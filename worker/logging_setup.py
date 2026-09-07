@@ -9,5 +9,3 @@ def setup_logging() -> None:
             "%(filename)s:%(lineno)d %(message)s"
         ),
     )
-
-    logging.getLogger("temporalio.workflow").setLevel(logging.WARNING)
