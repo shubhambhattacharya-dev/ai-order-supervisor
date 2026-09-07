@@ -1,5 +1,11 @@
+import asyncio
+import contextlib
+from datetime import timedelta
+
 from temporalio import workflow
-from logging_setup import setup_logging
+from temporalio.common import RetryPolicy
+
+from activities import actions, decide
 
 
 @workflow.defn
@@ -7,7 +13,10 @@ class OrderSupervisorWorkflow:
     def __init__(self):
         self.events: list[dict] = []
         self.processed_event_ids: set[str] = set()
+        self.actions_taken: list[dict] = []
         self.terminal = False
+        self.wake_seconds: int | None = None
+        self.wakeups = 0
 
     @workflow.run
     async def run(self, order_id: str) -> str:
@@ -18,67 +27,37 @@ class OrderSupervisorWorkflow:
 
         try:
             while not self.terminal:
-               
-                while self.events:
-                    event = self.events.pop(0)
-
-                    event_id = event.get("event_id")
-                    event_type = event.get("type")
-
-                    if not event_id or not event_type:
-                        workflow.logger.warning(
-                            "Ignoring malformed event",
-                            extra={
-                                "order_id": order_id,
-                                "event": event,
-                            },
-                        )
-                        continue
-
-                    workflow.logger.info(
-                        "Processing order event",
-                        extra={
-                            "order_id": order_id,
-                            "event_id": event_id,
-                            "event_type": event_type,
-                        },
-                    )
-
-                  
-                    workflow.logger.info(
-                        "Agent would decide here",
-                        extra={
-                            "order_id": order_id,
-                            "event_type": event_type,
-                        },
-                    )
-
-                    if event_type in {"COMPLETED", "CANCELLED"}:
-                        self.terminal = True
-
-                        workflow.logger.info(
-                            "Order reached terminal state",
-                            extra={
-                                "order_id": order_id,
-                                "event_type": event_type,
-                            },
-                        )
-                        break
+                await self._process_events(order_id)
 
                 if self.terminal:
                     break
 
-              
-                await workflow.wait_condition(
-                    lambda: len(self.events) > 0 or self.terminal
-                )
+                await self._wait_for_event_or_wake(order_id)
+
+            result = (
+                f"Order {order_id} supervisor completed: "
+                f"{len(self.processed_event_ids)} events processed, "
+                f"{len(self.actions_taken)} actions taken"
+            )
 
             workflow.logger.info(
                 "Order supervisor completed",
-                extra={"order_id": order_id},
+                extra={"order_id": order_id, "result": result},
             )
 
-            return f"Order {order_id} supervisor completed"
+            return result
+
+        except asyncio.CancelledError:
+            # Operator terminated the run: still produce the end-of-run output.
+            workflow.logger.info(
+                "Order supervisor terminated by operator",
+                extra={
+                    "order_id": order_id,
+                    "events_processed": len(self.processed_event_ids),
+                    "actions_taken": len(self.actions_taken),
+                },
+            )
+            raise
 
         except Exception:
             workflow.logger.exception(
@@ -86,6 +65,109 @@ class OrderSupervisorWorkflow:
                 extra={"order_id": order_id},
             )
             raise
+
+    async def _process_events(self, order_id: str) -> None:
+        while self.events:
+            event = self.events.pop(0)
+
+            event_id = event.get("event_id")
+            event_type = event.get("type")
+
+            if not event_id or not event_type:
+                workflow.logger.warning(
+                    "Ignoring malformed event",
+                    extra={"order_id": order_id, "event": event},
+                )
+                continue
+
+            decision = await workflow.execute_activity(
+                decide.decide,
+                args=[order_id, event],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+            await self._apply_decision(order_id, event, event_type, decision)
+
+            # Workflow-owned completion rule: the agent never ends the run.
+            if event_type in {"COMPLETED", "CANCELLED"}:
+                self.terminal = True
+
+                workflow.logger.info(
+                    "Order reached terminal state",
+                    extra={"order_id": order_id, "event_type": event_type},
+                )
+                break
+
+    async def _apply_decision(
+        self,
+        order_id: str,
+        event: dict,
+        event_type: str,
+        decision: dict,
+    ) -> None:
+        action = decision.get("action")
+
+        if action == "no_action":
+            return
+
+        if action == "sleep_until":
+            self.wake_seconds = int(decision.get("wake_after_minutes", 30)) * 60
+            return
+
+        record = await workflow.execute_activity(
+            actions.record_action,
+            args=[order_id, action, decision.get("reason", ""), event["event_id"]],
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        self.actions_taken.append(record)
+
+    async def _wait_for_event_or_wake(self, order_id: str) -> None:
+        timer = None
+
+        if self.wake_seconds is not None:
+            timer = asyncio.create_task(workflow.sleep(self.wake_seconds))
+            self.wake_seconds = None
+
+        await workflow.wait_condition(
+            lambda: bool(self.events)
+            or self.terminal
+            or (timer is not None and timer.done())
+        )
+
+        if timer is None:
+            return
+
+        if timer.done():
+            # Scheduled wake-up: the agent re-evaluates the order.
+            self.wakeups += 1
+            self.events.append(
+                {
+                    "event_id": f"wakeup-{self.wakeups}",
+                    "type": "SCHEDULED_WAKEUP",
+                    "payload": {"wakeup_number": self.wakeups},
+                }
+            )
+            workflow.logger.info(
+                "Scheduled wake-up fired",
+                extra={"order_id": order_id, "wakeup_number": self.wakeups},
+            )
+        else:
+            # An event arrived before the timer: cancel the pending timer.
+            timer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await timer
+
+    @workflow.query
+    def status(self) -> dict:
+        return {
+            "events_queued": len(self.events),
+            "events_processed": len(self.processed_event_ids),
+            "actions_taken": len(self.actions_taken),
+            "wakeups": self.wakeups,
+            "terminal": self.terminal,
+        }
 
     @workflow.signal
     async def order_event(self, event: dict) -> None:

@@ -3,6 +3,7 @@ import asyncio
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from activities import actions, decide
 from logging_setup import setup_logging
 from workflows.order_supervisor import OrderSupervisorWorkflow
 
@@ -16,6 +17,7 @@ async def main():
         client,
         task_queue="supervisor-task-queue",
         workflows=[OrderSupervisorWorkflow],
+        activities=[decide.decide, actions.record_action],
     ):
         print("Supervisor worker started...")
         await asyncio.Future()
