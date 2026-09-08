@@ -7,6 +7,17 @@ from activities import actions, decide
 from logging_setup import setup_logging
 from workflows.order_supervisor import OrderSupervisorWorkflow
 
+import asyncio
+import os
+
+
+
+from pathlib import Path
+from dotenv import dotenv_values   # needs: uv add python-dotenv
+
+env = dotenv_values(Path(__file__).parent / ".env")
+os.environ.update({k: v for k, v in env.items() if v})
+
 
 async def main():
     setup_logging()

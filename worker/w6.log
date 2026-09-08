@@ -1,0 +1,29 @@
+Traceback (most recent call last):
+  File "C:\Users\shubh\OneDrive\clound\OneDrive\Desktop\assiment\ai-order-supervisor\worker\supervisor_worker.py", line 38, in <module>
+    asyncio.run(main())
+  File "C:\Users\shubh\AppData\Roaming\uv\python\cpython-3.12.14-windows-x86_64-none\Lib\asyncio\runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "C:\Users\shubh\AppData\Roaming\uv\python\cpython-3.12.14-windows-x86_64-none\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\shubh\AppData\Roaming\uv\python\cpython-3.12.14-windows-x86_64-none\Lib\asyncio\base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "C:\Users\shubh\OneDrive\clound\OneDrive\Desktop\assiment\ai-order-supervisor\worker\supervisor_worker.py", line 25, in main
+    client = await Client.connect("localhost:7233")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\shubh\OneDrive\clound\OneDrive\Desktop\assiment\ai-order-supervisor\worker\.venv\Lib\site-packages\temporalio\client\_client.py", line 249, in connect
+    service_client = await next_function(connect_config)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\shubh\OneDrive\clound\OneDrive\Desktop\assiment\ai-order-supervisor\worker\.venv\Lib\site-packages\temporalio\service.py", line 316, in connect
+    return await _BridgeServiceClient.connect(config)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\shubh\OneDrive\clound\OneDrive\Desktop\assiment\ai-order-supervisor\worker\.venv\Lib\site-packages\temporalio\service.py", line 413, in connect
+    await client._connected_client()
+  File "C:\Users\shubh\OneDrive\clound\OneDrive\Desktop\assiment\ai-order-supervisor\worker\.venv\Lib\site-packages\temporalio\service.py", line 432, in _connected_client
+    self._bridge_client = await temporalio.bridge.client.Client.connect(
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\shubh\OneDrive\clound\OneDrive\Desktop\assiment\ai-order-supervisor\worker\.venv\Lib\site-packages\temporalio\bridge\client.py", line 114, in connect
+    await temporalio.bridge.temporal_sdk_bridge.connect_client(
+RuntimeError: Failed client connect: Server connection error: tonic::transport::Error(Transport, ConnectError(ConnectError("tcp connect error", 127.0.0.1:7233, Os { code: 10061, kind: ConnectionRefused, message: "No connection could be made because the target machine actively refused it." })))
