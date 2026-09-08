@@ -4,6 +4,7 @@ from temporalio import activity
 
 from llm.gateway import build_gateway
 from llm.spec import ChatSpec, GatewayError
+from observability import record_decision
 
 
 # The five business actions required by the brief, plus the runtime
@@ -118,9 +119,8 @@ async def decide(order_id: str, event: dict) -> dict:
 
     try:
         # Attempt 1: ask the LLM through the gateway.
-        result = await gateway.complete(
-            _build_spec(order_id, event)
-        )
+        spec = _build_spec(order_id, event)
+        result = await gateway.complete(spec)
 
         decision = _validate_decision(
             json.loads(result.content)
@@ -142,13 +142,20 @@ async def decide(order_id: str, event: dict) -> dict:
             }
         )
 
-        result = await gateway.complete(spec)
+        try:
+            result = await gateway.complete(spec)
 
-        decision = _validate_decision(
-            json.loads(result.content)
-        )
+            decision = _validate_decision(
+                json.loads(result.content)
+            )
 
-        provider = result.usage.provider
+            provider = result.usage.provider
+
+        except (json.JSONDecodeError, ValueError, GatewayError):
+            # Still invalid: degrade to the safe table rule instead of
+            # failing the activity (and with it the workflow).
+            decision = _table_decision(event_type)
+            provider = "table-fallback"
 
     except GatewayError:
         # All providers failed. Use the safe table fallback.
@@ -164,5 +171,19 @@ async def decide(order_id: str, event: dict) -> dict:
         provider,
         decision["reason"],
     )
+
+    trace_url = record_decision(
+        order_id=order_id,
+        event=event,
+        decision=decision,
+        provider=provider,
+        usage=vars(result.usage) if provider != "table-fallback" else None,
+    )
+
+    if activity.in_activity() and trace_url:
+        activity.logger.info(
+            "[DECISION] Langfuse trace: %s",
+            trace_url,
+        )
 
     return decision

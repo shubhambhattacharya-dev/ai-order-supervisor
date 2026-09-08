@@ -15,8 +15,12 @@ import os
 from pathlib import Path
 from dotenv import dotenv_values   # needs: uv add python-dotenv
 
-env = dotenv_values(Path(__file__).parent / ".env")
-os.environ.update({k: v for k, v in env.items() if v})
+# Load repo-root .env first, then worker/.env overrides (non-empty values only).
+for _env_path in (Path(__file__).parent.parent / ".env", Path(__file__).parent / ".env"):
+    if _env_path.exists():
+        os.environ.update(
+            {k: v for k, v in dotenv_values(_env_path).items() if v}
+        )
 
 
 async def main():
