@@ -15,6 +15,8 @@ class OrderSupervisorWorkflow:
         self.terminal = False
         self.wake_seconds: int | None = None
         self.wakeups = 0
+        self.instructions: list[str] = []
+        self.paused = False
 
     @workflow.run
     async def run(self, order_id: str) -> str:
@@ -25,6 +27,14 @@ class OrderSupervisorWorkflow:
 
         try:
             while not self.terminal:
+                if self.paused:
+                    await workflow.wait_condition(
+                        lambda: not self.paused or self.terminal
+                    )
+
+                    if self.terminal:
+                        break
+
                 await self._process_events(order_id)
 
                 if self.terminal:
@@ -40,7 +50,10 @@ class OrderSupervisorWorkflow:
 
             workflow.logger.info(
                 "Order supervisor completed",
-                extra={"order_id": order_id, "result": result},
+                extra={
+                    "order_id": order_id,
+                    "result": result,
+                },
             )
 
             return result
@@ -73,13 +86,22 @@ class OrderSupervisorWorkflow:
             if not event_id or not event_type:
                 workflow.logger.warning(
                     "Ignoring malformed event",
-                    extra={"order_id": order_id, "event": event},
+                    extra={
+                        "order_id": order_id,
+                        "event": event,
+                    },
                 )
                 continue
 
             decision = await workflow.execute_activity(
                 "decide",
-                args=[order_id, event],
+                args=[
+                    order_id,
+                    {
+                        **event,
+                        "operator_instructions": self.instructions,
+                    },
+                ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -135,7 +157,10 @@ class OrderSupervisorWorkflow:
 
         self.actions_taken.append(record)
 
-    async def _wait_for_event_or_wake(self, order_id: str) -> None:
+    async def _wait_for_event_or_wake(
+        self,
+        order_id: str,
+    ) -> None:
         timer = None
 
         if self.wake_seconds is not None:
@@ -161,7 +186,7 @@ class OrderSupervisorWorkflow:
                     "event_id": f"wakeup-{self.wakeups}",
                     "type": "SCHEDULED_WAKEUP",
                     "payload": {
-                        "wakeup_number": self.wakeups
+                        "wakeup_number": self.wakeups,
                     },
                 }
             )
@@ -188,6 +213,8 @@ class OrderSupervisorWorkflow:
             "actions_taken": len(self.actions_taken),
             "wakeups": self.wakeups,
             "terminal": self.terminal,
+            "paused": self.paused,
+            "instructions": len(self.instructions),
         }
 
     @workflow.signal
@@ -217,4 +244,35 @@ class OrderSupervisorWorkflow:
                 "event_id": event_id,
                 "event_type": event.get("type"),
             },
+        )
+
+    @workflow.signal
+    async def instruction(self, text: str) -> None:
+        """Operator guidance: honored by the next decision."""
+        self.instructions.append(text)
+
+        workflow.logger.info(
+            "Operator instruction received",
+            extra={
+                "instruction_count": len(self.instructions),
+            },
+        )
+
+    @workflow.signal
+    async def pause(self) -> None:
+        if self.terminal:
+            return
+
+        self.paused = True
+
+        workflow.logger.info(
+            "Supervisor paused by operator"
+        )
+
+    @workflow.signal
+    async def resume(self) -> None:
+        self.paused = False
+
+        workflow.logger.info(
+            "Supervisor resumed by operator"
         )
