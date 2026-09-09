@@ -3,5 +3,7 @@ node_modules/
 __pycache__/
 .next/
 venv/
+.venv/
 *.pyc
-*.log.hermes-tmp.*/
+*.log
+.hermes-tmp.*/
