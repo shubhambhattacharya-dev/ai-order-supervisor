@@ -12,12 +12,32 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12.14"
+          python-version: "3.12"
 
-      - name: Check Python syntax
-        run: python -m compileall -q -x '\.venv' worker
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install worker dependencies
+        working-directory: worker
+        run: uv sync
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync
+
+      - name: Check worker syntax
+        run: python -m compileall -q worker
+
+      - name: Check backend syntax
+        run: python -m compileall -q backend
+
+      - name: Run worker tests
+        working-directory: worker
+        run: uv run pytest -q
