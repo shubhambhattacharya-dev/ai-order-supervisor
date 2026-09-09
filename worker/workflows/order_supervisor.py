@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 from datetime import timedelta
 
 from temporalio import workflow
@@ -16,6 +17,8 @@ class OrderSupervisorWorkflow:
         self.wake_seconds: int | None = None
         self.wakeups = 0
         self.instructions: list[str] = []
+        self.memory: list[dict] = []
+        self.timeline: list[dict] = []
         self.paused = False
 
     @workflow.run
@@ -42,21 +45,26 @@ class OrderSupervisorWorkflow:
 
                 await self._wait_for_event_or_wake(order_id)
 
-            result = (
-                f"Order {order_id} supervisor completed: "
-                f"{len(self.processed_event_ids)} events processed, "
-                f"{len(self.actions_taken)} actions taken"
+            report = await workflow.execute_activity(
+                "final_output",
+                args=[
+                    order_id,
+                    self.memory,
+                    self.actions_taken,
+                ],
+                start_to_close_timeout=timedelta(seconds=45),
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
             workflow.logger.info(
-                "Order supervisor completed",
+                "Final output generated",
                 extra={
                     "order_id": order_id,
-                    "result": result,
+                    "summary": report["summary"],
                 },
             )
 
-            return result
+            return json.dumps(report)
 
         except asyncio.CancelledError:
             workflow.logger.info(
@@ -133,13 +141,49 @@ class OrderSupervisorWorkflow:
         decision: dict,
     ) -> None:
         action = decision.get("action")
+        reason = decision.get("reason", "")
+
+        # Add the event to the timeline.
+        self.timeline.append(
+            {
+                "type": "event",
+                "event_id": event["event_id"],
+                "event_type": event_type,
+            }
+        )
+
+        # Add important event information to memory.
+        self.memory.append(
+            {
+                "event_type": event_type,
+                "reason": reason,
+            }
+        )
 
         if action == "no_action":
+            self.timeline.append(
+                {
+                    "type": "decision",
+                    "action": "no_action",
+                    "reason": reason,
+                }
+            )
             return
 
         if action == "sleep_until":
-            self.wake_seconds = (
-                int(decision.get("wake_after_minutes", 30)) * 60
+            wake_minutes = int(
+                decision.get("wake_after_minutes", 30)
+            )
+
+            self.wake_seconds = wake_minutes * 60
+
+            self.timeline.append(
+                {
+                    "type": "decision",
+                    "action": "sleep_until",
+                    "wake_after_minutes": wake_minutes,
+                    "reason": reason,
+                }
             )
             return
 
@@ -148,7 +192,7 @@ class OrderSupervisorWorkflow:
             args=[
                 order_id,
                 action,
-                decision.get("reason", ""),
+                reason,
                 event["event_id"],
             ],
             start_to_close_timeout=timedelta(seconds=30),
@@ -156,6 +200,21 @@ class OrderSupervisorWorkflow:
         )
 
         self.actions_taken.append(record)
+
+        self.timeline.append(
+            {
+                "type": "action",
+                "action": action,
+                "reason": reason,
+            }
+        )
+
+        self.memory.append(
+            {
+                "action": action,
+                "reason": reason,
+            }
+        )
 
     async def _wait_for_event_or_wake(
         self,
@@ -215,6 +274,8 @@ class OrderSupervisorWorkflow:
             "terminal": self.terminal,
             "paused": self.paused,
             "instructions": len(self.instructions),
+            "memory": self.memory,
+            "timeline": self.timeline,
         }
 
     @workflow.signal
