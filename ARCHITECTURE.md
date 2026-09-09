@@ -39,7 +39,7 @@ Stack: Next.js (App Router) + Tailwind · FastAPI · Temporal Python SDK · Post
 6. Update memory, schedule the next durable timer, sleep.
 7. On a terminal event / termination / max age: a **final-output activity** produces the summary, actions taken, learnings and feedback.
 
-The five business actions (brief): `message_fulfillment_team`, `message_payments_team`, `message_logistics_team`, `message_customer`, `create_internal_note` — each persisted as an activity record. Runtime capabilities: `sleep_until`, `refresh_memory_summary`, `record_reasoning`.
+The five business actions (brief): `message_fulfillment_team`, `message_payments_team`, `message_logistics_team`, `message_customer`, `create_internal_note` — each persisted as an activity record. Runtime capability: `sleep_until` (durable timer). Memory compaction and reasoning records are designed in the full design document as Phase 2.
 
 ## 5. Cost and safety
 
