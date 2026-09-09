@@ -131,6 +131,10 @@ The safety model is built on four boundaries. Each one is enforced by code, not 
 
 ## Architecture (short note)
 
+![System design](docs/system-design.png)
+
+**One paragraph:** the operator starts a run from the console (optionally from a saved supervisor config); FastAPI starts one durable Temporal workflow for that order. Events arrive as **signals**; a zero-token **wake-up policy** filters them — important events wake the agent, routine ones are logged while it sleeps, unknown ones wake it to be safe. The **decide activity** asks the LLM through a **provider gateway** (retry-once, table degrade), validates the strict-JSON answer against an **action allowlist**, and persists the decision. Every action lands in the single **activity log** (Postgres) and appears live on the timeline. The agent sleeps on a **durable timer** until the next wake-up. On a terminal event, a **final-output activity** writes the summary, learnings and feedback.
+
 The system has five parts. A **Next.js console** where the operator works. A **FastAPI service** that validates input and talks to Temporal. **Temporal**, which runs one durable workflow per order and guarantees that every step happens exactly once, in order, even across crashes. A **Python worker** that executes the workflow and its activities, including the agent. And **PostgreSQL**, which stores the source of truth: supervisor configurations, runs, the event timeline, the activity log, memory summaries, and the final outputs.
 
 Three decisions shape everything else. First, the workflow code is deterministic and never touches the network — the LLM is called inside an activity, so its answer is recorded in history and replayed instead of being re-rolled after a crash. Second, a small wake-up policy (a pure function with no tokens) decides whether an event is important enough to wake the agent, so noise costs nothing. Third, the workflow — not the agent — owns completion: the run ends on a terminal event, an operator termination, or a maximum age, and the final report is produced even then.
