@@ -55,14 +55,19 @@ async def record_action(
     }
 
     if activity.in_activity():
-        activity.logger.info("Agent action recorded", extra=record)
+        activity.logger.info(
+            "[ACTION] %s | %s recorded (event %s)",
+            order_id,
+            action,
+            event_id,
+        )
 
     try:
         _insert(record)
     except Exception as exc:  # noqa: S110
         activity.logger.warning(
-            "activity log write failed — run continues without it",
-            extra={"error": str(exc), "record": record},
+            "[ACTION] DB write failed, run continues without it: %s",
+            exc,
         )
 
     return record

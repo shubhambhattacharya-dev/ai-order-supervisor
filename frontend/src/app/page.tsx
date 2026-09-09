@@ -1,160 +1,151 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
 import {
   createRun,
-  injectEvent,
-  getStatus,
-  type RunStatus,
+  listRuns,
+  listSupervisors,
+  type RunSummary,
+  type Supervisor,
 } from "@/lib/api";
+import StatusChip from "@/components/StatusChip";
 
-const EVENT_TYPES = [
-  "STATUS_UPDATE",
-  "PAYMENT_DELAYED",
-  "SHIPMENT_DELAYED",
-  "FULFILLMENT_DELAYED",
-  "CUSTOMER_MESSAGE_RECEIVED",
-  "REFUND_REQUESTED",
-  "COMPLETED",
-  "CANCELLED",
-];
-
-export default function Home() {
+export default function RunsPage() {
+  const [runs, setRuns] = useState<RunSummary[] | null>(null);
+  const [supervisors, setSupervisors] = useState<Supervisor[]>([]);
   const [orderId, setOrderId] = useState("");
-  const [activeRun, setActiveRun] = useState<string | null>(null);
-  const [status, setStatus] = useState<RunStatus | null>(null);
-  const [eventType, setEventType] = useState(EVENT_TYPES[0]);
+  const [supervisorId, setSupervisorId] = useState<number | undefined>();
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Step 4: Start or attach to a workflow run
-  async function startRun() {
+  const refresh = useCallback(async () => {
+    setRuns(await listRuns());
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 4000);
+    listSupervisors().then((s) => {
+      setSupervisors(s);
+      if (s.length > 0) setSupervisorId(s[0].id);
+    });
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  async function start() {
     setError(null);
+    const id = orderId.trim();
+    if (!id || busy) return;
 
-    if (!orderId.trim()) return;
-
-    const res = await createRun(orderId.trim());
+    setBusy(true);
+    const res = await createRun(id, supervisorId);
+    setBusy(false);
 
     if (res.ok || res.status === 409) {
-      setActiveRun(orderId.trim());
+      setOrderId("");
+      refresh();
     } else {
-      setError(`failed to start run (${res.status})`);
+      setError(`Could not start run (${res.status}). Is the worker running?`);
     }
   }
-
-  // Step 5: Inject an event into the workflow
-  async function send() {
-    setError(null);
-
-    if (!activeRun) return;
-
-    const res = await injectEvent(
-      activeRun,
-      `evt-${Date.now()}`,
-      eventType,
-    );
-
-    if (!res.ok) {
-      setError(`inject failed (${res.status})`);
-    }
-  }
-
-  // Step 6: Get the latest workflow status
-  const refresh = useCallback(async () => {
-    if (activeRun) {
-      setStatus(await getStatus(activeRun));
-    }
-  }, [activeRun]);
-
-  // Step 6: Poll the backend every 3 seconds
-  useEffect(() => {
-    if (!activeRun) return;
-
-    refresh();
-
-    const t = setInterval(refresh, 3000);
-
-    return () => clearInterval(t);
-  }, [activeRun, refresh]);
 
   return (
-    <main className="max-w-3xl mx-auto p-8">
-      <h1 className="text-2xl font-bold mb-4">
-        AI Order Supervisor
-      </h1>
-
-      {error && (
-        <div className="bg-red-100 text-red-700 p-3 rounded mb-4">
-          {error}
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold">Runs</h1>
+          <p className="text-sm text-sub">
+            One Temporal workflow per order — active and completed.
+          </p>
         </div>
-      )}
+      </div>
 
-      {/* Step 4: Start or attach */}
-      <section className="border rounded p-4 mb-4 space-y-2">
-        <h2 className="font-semibold">
-          1 · Start or attach to a run
-        </h2>
-
-        <div className="flex gap-2">
+      <section className="rounded-xl border border-line bg-panel p-4">
+        <h2 className="text-sm font-medium mb-3">Start a new run</h2>
+        <div className="flex flex-wrap gap-2">
           <input
             value={orderId}
             onChange={(e) => setOrderId(e.target.value)}
-            placeholder="ORD-100"
-            className="border p-2 rounded flex-1"
+            onKeyDown={(e) => e.key === "Enter" && start()}
+            placeholder="ORD-1042"
+            className="flex-1 min-w-48 rounded-lg border border-line bg-panelsoft px-3 py-2 text-sm outline-none focus:border-brand"
           />
-
-          <button
-            onClick={startRun}
-            className="bg-black text-white px-4 py-2 rounded"
+          <select
+            value={supervisorId ?? ""}
+            onChange={(e) =>
+              setSupervisorId(e.target.value ? Number(e.target.value) : undefined)
+            }
+            className="rounded-lg border border-line bg-panelsoft px-3 py-2 text-sm outline-none focus:border-brand"
           >
-            {activeRun === orderId.trim() ? "Attach" : "Start"}
+            {supervisors.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={start}
+            disabled={busy || !orderId.trim()}
+            className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brandhover disabled:opacity-40"
+          >
+            {busy ? "Starting…" : "Start run"}
           </button>
         </div>
-
-        {activeRun && (
-          <p className="text-sm text-green-600">
-            Attached: {activeRun}
-          </p>
-        )}
+        {error && <p className="mt-2 text-sm text-danger">{error}</p>}
       </section>
 
-      {/* Step 5: Inject event */}
-      <section className="border rounded p-4 mb-4 flex gap-2">
-        <select
-          value={eventType}
-          onChange={(e) => setEventType(e.target.value)}
-          className="border p-2 rounded"
-        >
-          {EVENT_TYPES.map((t) => (
-            <option key={t}>{t}</option>
-          ))}
-        </select>
-
-        <button
-          onClick={send}
-          disabled={!activeRun}
-          className="bg-black text-white px-4 py-2 rounded disabled:opacity-40"
-        >
-          Inject event
-        </button>
-      </section>
-
-      {/* Step 6: Live status */}
-      <section className="border rounded p-4 flex flex-wrap gap-2">
-        {status ? (
-          Object.entries(status.status).map(([k, v]) => (
-            <span
-              key={k}
-              className="border rounded-full px-3 py-1 text-sm"
-            >
-              {k}: {String(v)}
-            </span>
-          ))
+      <section className="rounded-xl border border-line bg-panel overflow-hidden">
+        {runs === null ? (
+          <p className="p-6 text-sm text-sub">Loading runs…</p>
+        ) : runs.length === 0 ? (
+          <div className="p-8 text-center">
+            <p className="text-sm text-sub">No runs yet.</p>
+            <p className="text-xs text-sub mt-1">
+              Start your first run above — make sure the worker is running.
+            </p>
+          </div>
         ) : (
-          <p className="text-gray-500">
-            Start a run to see live status.
-          </p>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-line text-left text-xs text-sub uppercase tracking-wide">
+                <th className="px-4 py-3 font-medium">Order</th>
+                <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 font-medium">Started</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {runs.map((r) => (
+                <tr
+                  key={r.workflow_id + r.run_id}
+                  className="border-b border-line last:border-0 hover:bg-panelsoft"
+                >
+                  <td className="px-4 py-3 font-mono text-xs">{r.order_id}</td>
+                  <td className="px-4 py-3">
+                    <StatusChip
+                      label={r.status.replace("WorkflowExecutionStatus.", "")}
+                    />
+                  </td>
+                  <td className="px-4 py-3 text-sub text-xs">
+                    {r.start_time
+                      ? new Date(r.start_time).toLocaleString()
+                      : "—"}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <Link
+                      href={`/runs/${r.order_id}`}
+                      className="text-brand hover:underline text-xs font-medium"
+                    >
+                      Open →
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </section>
-    </main>
+    </div>
   );
 }

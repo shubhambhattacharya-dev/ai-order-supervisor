@@ -10,6 +10,7 @@ from temporalio.common import RetryPolicy
 @workflow.defn
 class OrderSupervisorWorkflow:
     def __init__(self):
+        self.order_id = ""
         self.events: list[dict] = []
         self.processed_event_ids: set[str] = set()
         self.actions_taken: list[dict] = []
@@ -23,10 +24,8 @@ class OrderSupervisorWorkflow:
 
     @workflow.run
     async def run(self, order_id: str) -> str:
-        workflow.logger.info(
-            "Order supervisor started",
-            extra={"order_id": order_id},
-        )
+        self.order_id = order_id
+        workflow.logger.info("[RUN] started for %s", order_id)
 
         try:
             while not self.terminal:
@@ -57,31 +56,21 @@ class OrderSupervisorWorkflow:
             )
 
             workflow.logger.info(
-                "Final output generated",
-                extra={
-                    "order_id": order_id,
-                    "summary": report["summary"],
-                },
+                "[DONE] %s | summary: %s", order_id, report["summary"]
             )
 
             return json.dumps(report)
 
         except asyncio.CancelledError:
             workflow.logger.info(
-                "Order supervisor terminated by operator",
-                extra={
-                    "order_id": order_id,
-                    "events_processed": len(self.processed_event_ids),
-                    "actions_taken": len(self.actions_taken),
-                },
+                "[CONTROL] terminated by operator (events=%d, actions=%d)",
+                len(self.processed_event_ids),
+                len(self.actions_taken),
             )
             raise
 
         except Exception:
-            workflow.logger.exception(
-                "Order supervisor failed",
-                extra={"order_id": order_id},
-            )
+            workflow.logger.exception("[RUN] failed for %s", order_id)
             raise
 
     async def _process_events(self, order_id: str) -> None:
@@ -125,11 +114,8 @@ class OrderSupervisorWorkflow:
                 self.terminal = True
 
                 workflow.logger.info(
-                    "Order reached terminal state",
-                    extra={
-                        "order_id": order_id,
-                        "event_type": event_type,
-                    },
+                    "[RULE] terminal event %s -> completing run",
+                    event_type,
                 )
                 break
 
@@ -251,11 +237,7 @@ class OrderSupervisorWorkflow:
             )
 
             workflow.logger.info(
-                "Scheduled wake-up fired",
-                extra={
-                    "order_id": order_id,
-                    "wakeup_number": self.wakeups,
-                },
+                "[WAKEUP] scheduled wake-up #%d fired", self.wakeups
             )
 
         else:
@@ -284,15 +266,13 @@ class OrderSupervisorWorkflow:
 
         if not event_id:
             workflow.logger.warning(
-                "Ignoring event without event_id",
-                extra={"event": event},
+                "[EVENT] rejected: missing event_id (%s)", event
             )
             return
 
         if event_id in self.processed_event_ids:
             workflow.logger.info(
-                "Ignoring duplicate event",
-                extra={"event_id": event_id},
+                "[DEDUP] %s duplicate ignored", event_id
             )
             return
 
@@ -300,11 +280,10 @@ class OrderSupervisorWorkflow:
         self.events.append(event)
 
         workflow.logger.info(
-            "Order event received",
-            extra={
-                "event_id": event_id,
-                "event_type": event.get("type"),
-            },
+            "[EVENT] %s received %s (%s)",
+            self.order_id,
+            event.get("type"),
+            event_id,
         )
 
     @workflow.signal
@@ -313,10 +292,7 @@ class OrderSupervisorWorkflow:
         self.instructions.append(text)
 
         workflow.logger.info(
-            "Operator instruction received",
-            extra={
-                "instruction_count": len(self.instructions),
-            },
+            "[INSTRUCTION] added (total %d)", len(self.instructions)
         )
 
     @workflow.signal
@@ -326,14 +302,10 @@ class OrderSupervisorWorkflow:
 
         self.paused = True
 
-        workflow.logger.info(
-            "Supervisor paused by operator"
-        )
+        workflow.logger.info("[CONTROL] paused by operator")
 
     @workflow.signal
     async def resume(self) -> None:
         self.paused = False
 
-        workflow.logger.info(
-            "Supervisor resumed by operator"
-        )
+        workflow.logger.info("[CONTROL] resumed by operator")

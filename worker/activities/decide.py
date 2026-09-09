@@ -162,16 +162,6 @@ async def decide(order_id: str, event: dict) -> dict:
         decision = _table_decision(event_type)
         provider = "table-fallback"
 
-    if activity.in_activity():
-     activity.logger.info(
-        "[DECISION] Order=%s | Event=%s | Action=%s | Provider=%s | Reason=%s",
-        order_id,
-        event_type,
-        decision["action"],
-        provider,
-        decision["reason"],
-    )
-
     trace_url = record_decision(
         order_id=order_id,
         event=event,
@@ -180,10 +170,14 @@ async def decide(order_id: str, event: dict) -> dict:
         usage=vars(result.usage) if provider != "table-fallback" else None,
     )
 
-    if activity.in_activity() and trace_url:
+    if activity.in_activity():
         activity.logger.info(
-            "[DECISION] Langfuse trace: %s",
-            trace_url,
+            "[DECIDE] %s | %s -> %s (%s)%s",
+            order_id,
+            event_type,
+            decision["action"],
+            provider,
+            f" | trace: {trace_url}" if trace_url else "",
         )
 
     return decision
