@@ -1,3 +1,6 @@
+import os
+
+import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -68,3 +71,45 @@ async def run_status(order_id: str):
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return {"order_id": order_id, "status": status}
+
+@app.get("/runs/{order_id}/activities")
+async def run_activities(order_id: str):
+    """Return the run's activity log from Postgres."""
+
+    with psycopg.connect(
+        host=os.environ.get("POSTGRES_HOST", "localhost"),
+        port=int(os.environ.get("POSTGRES_PORT", "5432")),
+        dbname=os.environ.get("POSTGRES_DB", "order_supervisor"),
+        user=os.environ.get("POSTGRES_USER", "postgres"),
+        password=os.environ.get("POSTGRES_PASSWORD", "postgres"),
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, order_id, event_id, activity_type, action, reason, created_at
+                FROM activity_records
+                WHERE order_id = %s
+                ORDER BY id DESC
+                LIMIT 200
+                """,
+                (order_id,),
+            )
+
+            rows = [
+                {
+                    "id": r[0],
+                    "order_id": r[1],
+                    "event_id": r[2],
+                    "activity_type": r[3],
+                    "action": r[4],
+                    "reason": r[5],
+                    "created_at": r[6].isoformat(),
+                }
+                for r in cur.fetchall()
+            ]
+
+    return {
+        "order_id": order_id,
+        "activities": rows,
+        "count": len(rows),
+    }
