@@ -1,9 +1,12 @@
+import asyncio
+import json
 import os
 
 import psycopg
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from models import CreateRunRequest, InjectEventRequest, InstructionRequest, SupervisorConfig
 from temporal import get_client, workflow_id
@@ -107,6 +110,32 @@ async def list_supervisors():
         }
         for r in rows
     ]
+
+
+@app.get("/supervisors/{supervisor_id}")
+async def get_supervisor(supervisor_id: int):
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, base_instruction, allowed_actions,
+                       default_wake_minutes
+                FROM supervisor_configs WHERE id = %s
+                """,
+                (supervisor_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="supervisor not found")
+
+    return {
+        "id": row[0],
+        "name": row[1],
+        "base_instruction": row[2],
+        "allowed_actions": row[3],
+        "default_wake_minutes": row[4],
+    }
 
 
 @app.post("/supervisors")
@@ -223,6 +252,12 @@ async def send_instruction(order_id: str, req: InstructionRequest):
     return {"delivered": True}
 
 
+@app.post("/runs/{order_id}/instructions")
+async def send_instruction_alias(order_id: str, req: InstructionRequest):
+    """Brief-suggested plural alias for /instruction."""
+    return await send_instruction(order_id, req)
+
+
 @app.post("/runs/{order_id}/pause")
 async def pause_run(order_id: str):
     handle = (await get_client()).get_workflow_handle(workflow_id(order_id))
@@ -275,6 +310,175 @@ async def run_memory(order_id: str):
         "memory": status.get("memory", []),
         "instructions": status.get("instructions", 0),
     }
+
+
+@app.get("/runs/{order_id}/decisions")
+async def run_decisions(order_id: str):
+    """LLM decision records for one run (observability)."""
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, event_id, provider, model, action, reason,
+                       prompt_tokens, completion_tokens, latency_ms,
+                       fallback_used, trace_url, created_at
+                FROM decisions WHERE order_id = %s
+                ORDER BY id DESC LIMIT 200
+                """,
+                (order_id,),
+            )
+            rows = cur.fetchall()
+
+    return {
+        "order_id": order_id,
+        "decisions": [
+            {
+                "id": r[0], "event_id": r[1], "provider": r[2], "model": r[3],
+                "action": r[4], "reason": r[5], "prompt_tokens": r[6],
+                "completion_tokens": r[7], "latency_ms": float(r[8] or 0),
+                "fallback_used": r[9],
+                "trace_url": r[10],
+                "created_at": r[11].isoformat(),
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.get("/runs/{order_id}/final")
+async def run_final(order_id: str):
+    """The persisted end-of-run report (summary, learnings, feedback)."""
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT summary, actions_taken, learnings, feedback, created_at
+                FROM final_outputs WHERE order_id = %s
+                """,
+                (order_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="final output not ready")
+
+    return {
+        "order_id": order_id,
+        "summary": row[0],
+        "actions_taken": row[1],
+        "learnings": row[2],
+        "feedback": row[3],
+        "created_at": row[4].isoformat(),
+    }
+
+
+@app.get("/analytics/decisions")
+async def analytics_decisions():
+    """Recent LLM decisions across all runs, for the observability page."""
+    with _db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT order_id, event_id, provider, model, action, reason,
+                       prompt_tokens, completion_tokens, latency_ms,
+                       fallback_used, created_at
+                FROM decisions ORDER BY id DESC LIMIT 100
+                """
+            )
+            rows = cur.fetchall()
+
+    decisions = [
+        {
+            "order_id": r[0], "event_id": r[1], "provider": r[2], "model": r[3],
+            "action": r[4], "reason": r[5], "prompt_tokens": r[6],
+            "completion_tokens": r[7], "latency_ms": float(r[8] or 0),
+            "fallback_used": r[9], "created_at": r[10].isoformat(),
+        }
+        for r in rows
+    ]
+
+    return {
+        "decisions": decisions,
+        "total_tokens": sum(
+            d["prompt_tokens"] + d["completion_tokens"] for d in decisions
+        ),
+        "avg_latency_ms": (
+            round(sum(d["latency_ms"] for d in decisions) / len(decisions), 1)
+            if decisions
+            else 0
+        ),
+        "fallback_count": sum(1 for d in decisions if d["fallback_used"]),
+    }
+
+
+@app.get("/observability")
+async def observability():
+    """Langfuse connection info for the console's observability page."""
+    host = os.environ.get("LANGFUSE_HOST", "").strip()
+    traces_url = os.environ.get("LANGFUSE_TRACES_URL", "").strip() or (
+        f"{host}/traces" if host else None
+    )
+    enabled = bool(traces_url)
+
+    return {
+        "enabled": enabled,
+        "host": host or None,
+        "traces_url": traces_url,
+    }
+
+
+@app.get("/runs/{order_id}/stream")
+async def stream_run(order_id: str):
+    """Server-Sent Events: pushes the run's status the moment it changes."""
+
+    async def event_gen():
+        last_payload = None
+        while True:
+            try:
+                handle = (await get_client()).get_workflow_handle(
+                    workflow_id(order_id)
+                )
+                status = await handle.query("status")
+                payload = json.dumps(
+                    {"order_id": order_id, "status": status or {}}
+                )
+            except Exception:
+                payload = json.dumps({"order_id": order_id, "status": None})
+
+            if payload != last_payload:
+                last_payload = payload
+                yield f"data: {payload}\n\n"
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/analytics/stream")
+async def stream_analytics():
+    """SSE: pushes the decisions feed whenever a new decision lands."""
+
+    async def event_gen():
+        last_payload = None
+        while True:
+            try:
+                data = await analytics_decisions()
+                payload = json.dumps(data)
+                if payload != last_payload:
+                    last_payload = payload
+                    yield f"data: {payload}\n\n"
+            except Exception:
+                pass
+            await asyncio.sleep(3)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/runs/{order_id}/activities")

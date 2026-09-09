@@ -23,6 +23,7 @@ export default function RunsPage() {
     setRuns(await listRuns());
   }, []);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- syncing with the backend / external systems on mount */
   useEffect(() => {
     refresh();
     const t = setInterval(refresh, 4000);
@@ -32,6 +33,7 @@ export default function RunsPage() {
     });
     return () => clearInterval(t);
   }, [refresh]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   async function start() {
     setError(null);

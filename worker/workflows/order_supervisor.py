@@ -6,6 +6,8 @@ from datetime import timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
+from policies.wake_policy import should_wake
+
 
 @workflow.defn
 class OrderSupervisorWorkflow:
@@ -21,6 +23,8 @@ class OrderSupervisorWorkflow:
         self.memory: list[dict] = []
         self.timeline: list[dict] = []
         self.paused = False
+        self.wake_deadline: str | None = None
+        self.started_at: str | None = None
 
     @workflow.run
     async def run(self, order_id: str) -> str:
@@ -28,6 +32,8 @@ class OrderSupervisorWorkflow:
         workflow.logger.info("[RUN] started for %s", order_id)
 
         try:
+            self.started_at = workflow.now().isoformat()
+
             while not self.terminal:
                 if self.paused:
                     await workflow.wait_condition(
@@ -87,6 +93,23 @@ class OrderSupervisorWorkflow:
                         "order_id": order_id,
                         "event": event,
                     },
+                )
+                continue
+
+            wake_now, why = should_wake(event)
+            if not wake_now:
+                self.timeline.append(
+                    {
+                        "type": "event",
+                        "event_id": event_id,
+                        "event_type": event_type,
+                    }
+                )
+                self.memory.append(
+                    {"event_type": event_type, "reason": why}
+                )
+                workflow.logger.info(
+                    "[POLICY] %s logged-only: %s", event_id, why
                 )
                 continue
 
@@ -162,6 +185,9 @@ class OrderSupervisorWorkflow:
             )
 
             self.wake_seconds = wake_minutes * 60
+            self.wake_deadline = (
+                workflow.now() + timedelta(seconds=self.wake_seconds)
+            ).isoformat()
 
             self.timeline.append(
                 {
@@ -246,6 +272,8 @@ class OrderSupervisorWorkflow:
             with contextlib.suppress(asyncio.CancelledError):
                 await timer
 
+        self.wake_deadline = None
+
     @workflow.query
     def status(self) -> dict:
         return {
@@ -253,6 +281,9 @@ class OrderSupervisorWorkflow:
             "events_processed": len(self.processed_event_ids),
             "actions_taken": len(self.actions_taken),
             "wakeups": self.wakeups,
+            "sleeping": self.wake_deadline is not None,
+            "next_wake_at": self.wake_deadline,
+            "started_at": self.started_at,
             "terminal": self.terminal,
             "paused": self.paused,
             "instructions": len(self.instructions),

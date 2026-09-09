@@ -18,8 +18,8 @@ class TestDecisionTable:
                 "no_action",
             }, f"{event_type} maps to non-allowed action {action}"
 
-    def test_unknown_event_falls_back_to_sleep(self):
-        assert DEFAULT_DECISION == ("sleep_until", 60)
+    def test_unknown_event_is_noted_not_slept(self):
+        assert DEFAULT_DECISION == ("create_internal_note", 60)
 
     @pytest.mark.parametrize(
         "event_type,expected_action",
@@ -29,6 +29,8 @@ class TestDecisionTable:
             ("CUSTOMER_MESSAGE_RECEIVED", "message_customer"),
             ("REFUND_REQUESTED", "create_internal_note"),
             ("COMPLETED", "no_action"),
+            ("DELIVERED", "no_action"),
+            ("NO_UPDATE_FOR_N_HOURS", "message_customer"),
         ],
     )
     def test_decide_maps_event_types(self, event_type, expected_action):
@@ -36,9 +38,16 @@ class TestDecisionTable:
         assert decision["action"] == expected_action
 
     def test_sleep_decisions_carry_wake_after_minutes(self):
-        decision = asyncio.run(decide("ORD-1", {"event_id": "e1", "type": "STATUS_UPDATE"}))
+        decision = asyncio.run(decide("ORD-1", {"event_id": "e1", "type": "SCHEDULED_WAKEUP"}))
         assert decision["action"] == "sleep_until"
         assert decision["wake_after_minutes"] > 0
+
+    def test_log_only_events_never_reach_decide(self):
+        # STATUS_UPDATE is filtered by the wake policy before this activity.
+        assert "STATUS_UPDATE" not in DECISIONS
+        from policies.wake_policy import should_wake
+        wake, _ = should_wake({"type": "STATUS_UPDATE"})
+        assert wake is False
 
     def test_terminal_decision_has_no_wake_time(self):
         decision = asyncio.run(decide("ORD-1", {"event_id": "e1", "type": "COMPLETED"}))

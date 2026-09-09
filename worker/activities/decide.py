@@ -1,10 +1,54 @@
 import json
+import os
 
 from temporalio import activity
 
 from llm.gateway import build_gateway
 from llm.spec import ChatSpec, GatewayError
 from observability import record_decision
+
+
+def _persist_decision(order_id: str, event: dict, decision: dict, provider: str, usage) -> None:
+    """Store the decision for observability. Never raises."""
+    try:
+        import psycopg
+
+        with psycopg.connect(
+            host=os.environ.get("POSTGRES_HOST", "localhost"),
+            port=int(os.environ.get("POSTGRES_PORT", "5432")),
+            dbname=os.environ.get("POSTGRES_DB", "order_supervisor"),
+            user=os.environ.get("POSTGRES_USER", "postgres"),
+            password=os.environ.get("POSTGRES_PASSWORD", "postgres"),
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO decisions
+                        (order_id, event_id, provider, model, action, reason,
+                         prompt_tokens, completion_tokens, latency_ms,
+                         fallback_used, trace_url)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        order_id,
+                        event.get("event_id"),
+                        provider,
+                        usage.model if usage else None,
+                        decision.get("action"),
+                        decision.get("reason"),
+                        usage.prompt_tokens if usage else 0,
+                        usage.completion_tokens if usage else 0,
+                        round(usage.latency_ms, 1) if usage else 0,
+                        usage.fallback_used if usage else False,
+                        trace_url,
+                    ),
+                )
+            conn.commit()
+    except Exception as exc:
+        if activity.in_activity():
+            activity.logger.warning(
+                "[DECIDE] decision persist skipped: %s", exc
+            )
 
 
 # The five business actions required by the brief, plus the runtime
@@ -28,12 +72,18 @@ DECISIONS = {
     "FULFILLMENT_DELAYED": ("message_fulfillment_team", 60),
     "CUSTOMER_MESSAGE_RECEIVED": ("message_customer", None),
     "REFUND_REQUESTED": ("create_internal_note", 240),
+    "SHIPMENT_CREATED": ("message_logistics_team", 120),
+    "DELIVERED": ("no_action", None),
+    "PAYMENT_CONFIRMED": ("no_action", None),
+    "NO_UPDATE_FOR_N_HOURS": ("message_customer", 60),
     "COMPLETED": ("no_action", None),
     "CANCELLED": ("no_action", None),
     "SCHEDULED_WAKEUP": ("sleep_until", 60),
 }
 
-DEFAULT_DECISION = ("sleep_until", 60)
+# Unknown event types: note them for operator review (the brief's
+# unknown-event escalation) instead of silently sleeping.
+DEFAULT_DECISION = ("create_internal_note", 60)
 
 
 def _validate_decision(decision: dict) -> dict:
@@ -114,6 +164,7 @@ async def decide(order_id: str, event: dict) -> dict:
     """
 
     event_type = event.get("type")
+    usage = None
 
     gateway = build_gateway()
 
@@ -127,6 +178,7 @@ async def decide(order_id: str, event: dict) -> dict:
         )
 
         provider = result.usage.provider
+        usage = result.usage
 
     except (json.JSONDecodeError, ValueError):
         # Attempt 2: retry once with a correction message.
@@ -150,6 +202,7 @@ async def decide(order_id: str, event: dict) -> dict:
             )
 
             provider = result.usage.provider
+            usage = result.usage
 
         except (json.JSONDecodeError, ValueError, GatewayError):
             # Still invalid: degrade to the safe table rule instead of
@@ -167,8 +220,10 @@ async def decide(order_id: str, event: dict) -> dict:
         event=event,
         decision=decision,
         provider=provider,
-        usage=vars(result.usage) if provider != "table-fallback" else None,
+        usage=usage,
     )
+
+    _persist_decision(order_id, event, decision, provider, usage)
 
     if activity.in_activity():
         activity.logger.info(

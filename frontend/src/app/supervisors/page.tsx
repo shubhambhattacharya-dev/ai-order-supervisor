@@ -30,9 +30,11 @@ export default function SupervisorsPage() {
     setConfigs(await listSupervisors());
   }
 
+  /* eslint-disable react-hooks/set-state-in-effect -- syncing with the backend / external systems on mount */
   useEffect(() => {
     refresh();
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   function toggle(action: string) {
     setActions((a) =>

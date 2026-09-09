@@ -138,6 +138,44 @@ async def final_output(order_id: str, events: list, actions: list) -> dict:
         if any(len(item) > 300 for item in report["feedback"]):
             raise ValueError("feedback item is too long")
 
+        try:
+            import os
+            import psycopg
+
+            with psycopg.connect(
+                host=os.environ.get("POSTGRES_HOST", "localhost"),
+                port=int(os.environ.get("POSTGRES_PORT", "5432")),
+                dbname=os.environ.get("POSTGRES_DB", "order_supervisor"),
+                user=os.environ.get("POSTGRES_USER", "postgres"),
+                password=os.environ.get("POSTGRES_PASSWORD", "postgres"),
+            ) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO final_outputs
+                            (order_id, summary, actions_taken, learnings, feedback)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (order_id) DO UPDATE SET
+                            summary = EXCLUDED.summary,
+                            actions_taken = EXCLUDED.actions_taken,
+                            learnings = EXCLUDED.learnings,
+                            feedback = EXCLUDED.feedback,
+                            created_at = NOW()
+                        """,
+                        (
+                            order_id,
+                            report.get("summary"),
+                            json.dumps(actions),
+                            json.dumps(report.get("key_learnings", [])),
+                            json.dumps(report.get("feedback", [])),
+                        ),
+                    )
+                conn.commit()
+        except Exception as exc:
+            activity.logger.warning(
+                "final output persist skipped: %s", exc
+            )
+
         return report
 
     except (json.JSONDecodeError, ValueError, GatewayError):
