@@ -4,4 +4,4 @@ __pycache__/
 .next/
 venv/
 *.pyc
-*.log
+*.log.hermes-tmp.*/
