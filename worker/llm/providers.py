@@ -10,7 +10,7 @@ class OpenAICompatAdapter:
         self.api_key = api_key
         self.model = model
 
-    async def complete(self, spec: ChatSpec) -> str:
+    async def complete(self, spec: ChatSpec) -> tuple[str, dict]:
         url = f"{self.base_url}/chat/completions"
 
         headers = {
@@ -37,7 +37,13 @@ class OpenAICompatAdapter:
 
             data = response.json()
 
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {})
+
+            return content, {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+            }
 
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
@@ -66,15 +72,15 @@ class FakeAdapter:
     def __init__(self, responses: list[str], name="fake"):
         self.responses = responses
         self.name = name
+        self.model = "fake"
 
-    async def complete(self, spec: ChatSpec) -> str:
+    async def complete(self, spec: ChatSpec) -> tuple[str, dict]:
         if not self.responses:
-            return ""
+            return "", {"prompt_tokens": 0, "completion_tokens": 0}
 
-        if len(self.responses) > 1:
-            return self.responses.pop(0)
+        content = self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
 
-        return self.responses[0]
+        return content, {"prompt_tokens": 0, "completion_tokens": 0}
 
 
 FAKE_RESPONSES = [

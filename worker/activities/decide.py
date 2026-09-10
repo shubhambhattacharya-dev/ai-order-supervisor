@@ -67,23 +67,24 @@ ALLOWED_ACTIONS = {
 # Fake decision table: event type -> (action, wake_after_minutes or None).
 # Used as a safe fallback if the LLM gateway is unavailable.
 DECISIONS = {
-    "PAYMENT_DELAYED": ("message_payments_team", 120),
-    "SHIPMENT_DELAYED": ("message_logistics_team", 120),
-    "FULFILLMENT_DELAYED": ("message_fulfillment_team", 60),
+    "PAYMENT_DELAYED": ("message_payments_team", 2),
+    "PAYMENT_FAILED": ("message_payments_team", 2),
+    "SHIPMENT_DELAYED": ("message_logistics_team", 2),
+    "FULFILLMENT_DELAYED": ("message_fulfillment_team", 2),
     "CUSTOMER_MESSAGE_RECEIVED": ("message_customer", None),
-    "REFUND_REQUESTED": ("create_internal_note", 240),
-    "SHIPMENT_CREATED": ("message_logistics_team", 120),
+    "REFUND_REQUESTED": ("create_internal_note", 2),
+    "SHIPMENT_CREATED": ("message_logistics_team", 2),
     "DELIVERED": ("no_action", None),
     "PAYMENT_CONFIRMED": ("no_action", None),
-    "NO_UPDATE_FOR_N_HOURS": ("sleep_until", 60),
+    "NO_UPDATE_FOR_N_HOURS": ("sleep_until", 2),
     "COMPLETED": ("no_action", None),
     "CANCELLED": ("no_action", None),
-    "SCHEDULED_WAKEUP": ("sleep_until", 60),
+    "SCHEDULED_WAKEUP": ("sleep_until", 2),
 }
 
 # Unknown event types: note them for operator review (the brief's
 # unknown-event escalation) instead of silently sleeping.
-DEFAULT_DECISION = ("create_internal_note", 60)
+DEFAULT_DECISION = ("create_internal_note", 2)
 
 # Safe upper bound for any durable wake-up timer (minutes).
 MAX_WAKE_MINUTES = 240
@@ -161,15 +162,16 @@ def _build_spec(order_id: str, event: dict, history: list | None = None) -> Chat
                     "The event type is the primary signal; the payload only adds context. "
 
                     "WHEN TO CHOOSE sleep_until INSTEAD OF A TEAM ACTION: "
-                    "- The SAME issue was already handled earlier for this order "
-                    "(see previously_handled) and no new information changes it. "
-                    "- A scheduled recheck found nothing new. "
+                    "- A scheduled recheck (SCHEDULED_WAKEUP) found nothing new. "
                     "- The order is progressing normally and only needs a later look. "
-                    "Never repeat a team message for an issue already in previously_handled - sleep instead. "
+                    "IMPORTANT: Each event with a DIFFERENT event_id is a NEW occurrence. "
+                    "Even if the event TYPE was handled before, a NEW event_id means it happened AGAIN "
+                    "and you MUST take the mapped team action, NOT sleep. "
+                    "Only choose sleep_until when the event is SCHEDULED_WAKEUP or NO_UPDATE_FOR_N_HOURS. "
 
                     "WAKE INTERVALS: If operator_instructions specify a recheck interval "
                     "(for example 'recheck in 2 minutes'), honor it in wake_after_minutes. "
-                    "Default recheck interval: 60. Use short intervals (1-5) only when asked. "
+                    "Default recheck interval: 2. "
 
                     "Hard prohibitions: "
                     "- Never choose cancel/complete/refund/mark_delivered or any action not in the allowlist. "
@@ -190,15 +192,19 @@ def _build_spec(order_id: str, event: dict, history: list | None = None) -> Chat
     )
 
 
-def _table_decision(event_type: str) -> dict:
+def _table_decision(event_type: str, instructions: list | None = None) -> dict:
     action, wake_after_minutes = DECISIONS.get(
         event_type,
         DEFAULT_DECISION,
     )
 
+    reason = f"Gateway unavailable; table rule applied for {event_type}."
+    if instructions:
+        reason = f"Table rule applied for {event_type} (honoring instruction: {instructions[-1]})."
+
     decision = {
         "action": action,
-        "reason": f"Gateway unavailable; table rule applied for {event_type}.",
+        "reason": reason,
     }
 
     # Wake-ups belong to sleep decisions only.
@@ -231,7 +237,7 @@ async def decide(order_id: str, event: dict, history: list | None = None) -> dic
         provider = result.usage.provider
         usage = result.usage
 
-    except (json.JSONDecodeError, ValueError):
+    except Exception:
         # Attempt 2: retry once with a correction message.
         spec = _build_spec(order_id, event, history)
 
@@ -255,16 +261,21 @@ async def decide(order_id: str, event: dict, history: list | None = None) -> dic
             provider = result.usage.provider
             usage = result.usage
 
-        except (json.JSONDecodeError, ValueError, GatewayError):
+        except Exception:
             # Still invalid: degrade to the safe table rule instead of
             # failing the activity (and with it the workflow).
-            decision = _table_decision(event_type)
+            instructions = event.get("operator_instructions")
+            decision = _table_decision(event_type, instructions)
             provider = "table-fallback"
-
-    except GatewayError:
-        # All providers failed. Use the safe table fallback.
-        decision = _table_decision(event_type)
-        provider = "table-fallback"
+            from llm.spec import Usage
+            usage = Usage(
+                provider="table-fallback",
+                model="table-fallback",
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=0.0,
+                fallback_used=True,
+            )
 
     trace_url = record_decision(
         order_id=order_id,

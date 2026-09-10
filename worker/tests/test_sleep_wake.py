@@ -3,6 +3,7 @@
 Run: uv run pytest tests/test_sleep_wake.py -v
 """
 
+import asyncio
 from datetime import datetime, timezone
 from unittest import mock
 
@@ -86,6 +87,10 @@ async def test_duplicate_event_is_ignored():
     wf = _make_wf()
     with mock.patch.object(
         workflow, "logger", logging.getLogger("test-workflow")
+    ), mock.patch.object(
+        workflow,
+        "now",
+        return_value=datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc),
     ):
         await wf.order_event(
             {"event_id": "e1", "type": "PAYMENT_DELAYED", "payload": {}}
@@ -128,42 +133,92 @@ async def test_sleep_until_sets_durable_timer_state():
     assert len(wf.actions_taken) == 0
 
 
+async def test_business_action_schedules_follow_up_wake():
+    """An action must not leave the supervisor waiting for a new signal forever."""
+    import logging
+
+    wf = _make_wf()
+    event = {"event_id": "e-action", "type": "PAYMENT_DELAYED", "payload": {}}
+
+    async def fake_activity(*args, **kwargs):
+        return {"action": "message_payments_team"}
+
+    with mock.patch.object(
+        workflow,
+        "now",
+        return_value=datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc),
+    ), mock.patch.object(
+        workflow, "execute_activity", side_effect=fake_activity
+    ), mock.patch.object(
+        workflow, "logger", logging.getLogger("test-workflow")
+    ):
+        await wf._apply_decision(
+            "ORD-SW",
+            event,
+            "PAYMENT_DELAYED",
+            {"action": "message_payments_team", "reason": "Payment needs review"},
+        )
+
+    assert wf.actions_taken
+    assert wf.wake_seconds == 2 * 60  # DEFAULT_WAKE_MINUTES follow-up recheck
+    assert wf.wake_deadline is not None
+
+
+def test_new_supervisor_waits_for_its_first_event():
+    """An untouched order is active, not sleeping on a timer."""
+    wf = _make_wf()
+
+    assert wf.wake_seconds is None
+    assert wf.wake_deadline is None
+
+
+async def test_routine_signal_is_logged_without_interrupting_sleep():
+    """Routine status updates are visible but do not wake the agent early."""
+    import logging
+
+    wf = _make_wf()
+    wf.wake_seconds = 60 * 60
+    wf.wake_deadline = "2026-09-10T13:00:00+00:00"
+
+    with mock.patch.object(
+        workflow, "logger", logging.getLogger("test-workflow")
+    ), mock.patch.object(
+        workflow,
+        "now",
+        return_value=datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc),
+    ):
+        await wf.order_event(
+            {"event_id": "routine-1", "type": "STATUS_UPDATE", "payload": {}}
+        )
+
+    assert wf.events == []
+    assert wf.wake_seconds == 60 * 60
+    assert wf.wake_deadline is not None
+    assert wf.timeline[-1]["event_type"] == "STATUS_UPDATE"
+    assert "stays asleep" in wf.timeline[-1]["reason"]
+
+
 async def test_scheduled_wake_appends_wakeup_event():
     """Requirement 12E: timer wake creates a SCHEDULED_WAKEUP event."""
-    import asyncio
     import logging
 
     wf = _make_wf()
     wf.wake_seconds = 60
 
-    async def fake_sleep(seconds):
-        return None  # "timer fires" immediately
+    async def fake_wait_condition(pred, **kwargs):
+        raise asyncio.TimeoutError
 
-    async def fake_wait_condition(pred):
-        import asyncio
-
-        # Let the created timer task finish so .done() becomes True.
-        for _ in range(5):
-            await asyncio.sleep(0)
-        return None
-
-    real_create_task = asyncio.create_task
-
-    def fake_create_task(coro, **kw):
-        return real_create_task(coro, **kw)
-
-    with mock.patch.object(workflow, "sleep", side_effect=fake_sleep), mock.patch.object(
+    with mock.patch.object(
         workflow, "wait_condition", side_effect=fake_wait_condition
     ), mock.patch.object(
         workflow, "logger", logging.getLogger("test-workflow")
-    ), mock.patch(
-        "asyncio.create_task", side_effect=fake_create_task
     ):
         await wf._wait_for_event_or_wake("ORD-SW")
 
     assert wf.wakeups == 1
     assert wf.events[0]["type"] == "SCHEDULED_WAKEUP"
     assert wf.events[0]["event_id"] == "wakeup-1"
+    assert "wakeup-1" in wf.processed_event_ids
 
 
 async def test_new_event_wakes_before_timer():
@@ -173,22 +228,18 @@ async def test_new_event_wakes_before_timer():
     while the timer is still pending - the timer must be cancelled and NO
     synthetic wakeup appended.
     """
-    import asyncio
     import logging
 
     wf = _make_wf()
     wf.wake_seconds = 300
 
-    sleep_started = asyncio.Event()
-
-    async def fake_sleep(seconds):
-        sleep_started.set()
-        await asyncio.Event().wait()  # never completes - timer still pending
-
-    async def fake_wait_condition(pred):
-        await sleep_started.wait()
+    async def fake_wait_condition(pred, **kwargs):
         with mock.patch.object(
             workflow, "logger", logging.getLogger("test-workflow")
+        ), mock.patch.object(
+            workflow,
+            "now",
+            return_value=datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc),
         ):
             # The event signal arrives while the timer is pending:
             await wf.order_event(
@@ -196,9 +247,7 @@ async def test_new_event_wakes_before_timer():
             )
         assert pred() is True
 
-    with mock.patch.object(workflow, "sleep", side_effect=fake_sleep), mock.patch.object(
-        workflow, "wait_condition", side_effect=fake_wait_condition
-    ):
+    with mock.patch.object(workflow, "wait_condition", side_effect=fake_wait_condition):
         await wf._wait_for_event_or_wake("ORD-SW")
 
     assert wf.wakeups == 0

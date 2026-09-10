@@ -14,40 +14,74 @@ If you remember one sentence: **the workflow decides WHEN things happen, the age
 
 ---
 
-## Quick start
+## Step-by-Step Setup Guide (Beginner-Friendly)
 
-### What you need
+You do not need to be a software engineer to run this project. Follow these simple steps in order.
 
-- Docker Desktop
-- Python 3.12 with [uv](https://docs.astral.sh/uv/)
-- Node.js 18 or newer
-- A Groq API key (free) for the LLM. Optional: an OpenRouter or TokenRouter key as a fallback provider.
+### What You Need on Your Computer
 
-### Step 1 — Start the infrastructure
+Before you start, make sure you have these four free programs installed:
 
-From the repository root:
+1. **Docker Desktop** — Runs the database and the workflow engine in the background.
+   - Download link: [https://www.docker.com/products/docker-desktop/](https://www.docker.com/products/docker-desktop/)
+   - *Make sure Docker Desktop is open and running on your computer.*
+2. **Node.js (version 18 or newer)** — Runs the website dashboard.
+   - Download link: [https://nodejs.org/](https://nodejs.org/)
+3. **Python (version 3.12)** — Runs the background worker and the backend server.
+   - Download link: [https://www.python.org/downloads/](https://www.python.org/downloads/)
+4. **uv (Python Package Manager)** — Installs Python dependencies automatically and safely without errors.
+   - **On Windows** (copy and paste into Windows PowerShell, then press Enter):
+     ```powershell
+     powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+     ```
+   - **On Mac or Linux** (copy and paste into Terminal, then press Enter):
+     ```bash
+     curl -LsSf https://astral.sh/uv/install.sh | sh
+     ```
+
+---
+
+### Step 1 — Start the Background Services
+
+Open your first terminal (or Command Prompt / PowerShell) in the main `ai-order-supervisor` folder.
+
+Type this command and press **Enter**:
 
 ```bash
 docker compose up -d
-docker ps
 ```
 
-You should see three containers running: `order-supervisor-temporal`, `order-supervisor-temporal-ui`, and `order-supervisor-postgres`.
+**What this does:**
+This command starts three essential services inside Docker:
+- **PostgreSQL Database** — Stores orders, templates, and history logs.
+- **Temporal Server** — The workflow engine that manages durable timers and sleep cycles.
+- **Temporal Dashboard** — A web page to inspect workflow history.
 
-### Step 2 — Set your keys
+**How to verify:**
+Type `docker ps` and press Enter. You will see three running containers named `order-supervisor-postgres`, `order-supervisor-temporal`, and `order-supervisor-temporal-ui`.
 
-Create a file named `.env` inside the `worker/` folder (copy from `worker/.env.example`) and fill in:
+---
 
-```text
-GROQ_API_KEY=your-key
-LANGFUSE_PUBLIC_KEY=optional
-LANGFUSE_SECRET_KEY=optional
-LANGFUSE_HOST=https://cloud.langfuse.com
-```
+### Step 2 — Configure Environment Settings (Optional API Key)
 
-Langfuse is optional. With no keys, tracing is silently disabled and everything else works.
+1. Open the folder named `worker`.
+2. Look for the file named `.env.example`.
+3. Make a copy of `.env.example` in the same folder and rename the copy to `.env`.
+4. Open `.env` in any plain text editor (such as Notepad or VS Code).
+5. If you have a free Groq API key from [https://console.groq.com/](https://console.groq.com/), insert it here:
+   ```text
+   GROQ_API_KEY=your_actual_key_here
+   ```
 
-### Step 3 — Start the worker (the agent runtime)
+> **Note for beginners:** An API key is **optional**. If you do not have an API key, leave it blank! The application has a built-in safe decision engine that runs completely offline for free.
+
+---
+
+### Step 3 — Start the AI Worker (Terminal Window 1)
+
+The worker is the background engine that receives events, runs decisions, and executes actions.
+
+In your terminal, navigate to the `worker` folder and start the worker:
 
 ```bash
 cd worker
@@ -55,17 +89,42 @@ uv sync
 uv run python supervisor_worker.py
 ```
 
-`Supervisor worker started...` means it is connected and waiting for tasks. Keep this terminal open.
+**What you will see:**
+When successfully connected, the terminal displays:
+```text
+Supervisor worker started on queue 'supervisor-task-queue'. Waiting for tasks...
+```
+👉 **Important:** Keep this terminal window open! Leave it running.
 
-### Step 4 — Start the API
+---
+
+### Step 4 — Start the Backend Application Interface (Terminal Window 2)
+
+The backend service connects the website to the database and workflow engine.
+
+Open a **new, second terminal window**, go to the `backend` folder, and start the server:
 
 ```bash
 cd backend
 uv sync
-uv run uvicorn main:app --port 8000
+uv run uvicorn main:app --reload --port 8000
 ```
 
-### Step 5 — Start the operator console
+**What you will see:**
+The terminal will display:
+```text
+Uvicorn running on http://127.0.0.1:8000
+Application startup complete.
+```
+👉 **Important:** Keep this second terminal window open as well!
+
+---
+
+### Step 5 — Start the Operator Website Console (Terminal Window 3)
+
+The frontend is the visual website where you view orders and control supervisors.
+
+Open a **third terminal window**, navigate to the `frontend` folder, and run:
 
 ```bash
 cd frontend
@@ -73,16 +132,37 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000
+**What you will see:**
+The terminal will display:
+```text
+Ready in ... ms
+- Local: http://localhost:3000
+```
 
-### Step 6 — Run the tests
+Now, open your favorite web browser (Google Chrome, Microsoft Edge, Safari, or Firefox) and visit:
+👉 **[http://localhost:3000](http://localhost:3000)**
+
+You will see the AI Order Supervisor operator interface!
+
+---
+
+### Step 6 — Verify the System with Automated Tests (Terminal Window 4)
+
+To verify that every component is working properly, you can run the test suite.
+
+Open a **fourth terminal window** and run:
 
 ```bash
 cd worker
-uv run pytest tests/ -q
+uv run pytest tests/ -v
 ```
 
-All 26 tests should pass in a few seconds. They do not need the server, the database, or an LLM key, because the LLM is replaced by a fake in tests.
+**What you will see:**
+All **41 automated tests** will execute and pass:
+```text
+41 passed in ... seconds
+```
+This confirms that the workflow lifecycle, decision allowlist, security guardrails, sleep/wake cycles, and end-of-run reports are working properly.
 
 ---
 
@@ -177,7 +257,7 @@ worker/       The agent runtime
   activities/   decide (LLM), record_action (Postgres), final_output (report)
   llm/          Gateway, provider adapters, fake adapter for tests
   policies/     Wake-up policy (which events matter)
-  tests/        26 tests: decision table, journeys, gateway, report
+  tests/        41 tests: decision table, journeys, gateway, report, sleep/wake, timeline
 db/           Database schema
 docker-compose.yml   Temporal + PostgreSQL + Temporal UI
 ```

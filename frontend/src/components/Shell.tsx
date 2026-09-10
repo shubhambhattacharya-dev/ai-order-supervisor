@@ -57,9 +57,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
               <Link
                 key={href}
                 href={href}
-                className={`nav-item ${active ? "active" : ""} ${
-                  href === "/settings" ? "opacity-50" : ""
-                }`}
+                className={`nav-item ${active ? "active" : ""}`}
               >
                 <Icon size={20} />
                 <span className="flex-1">{label}</span>

@@ -25,6 +25,8 @@ export type TimelineEntry = {
   action?: string;
   reason?: string;
   wake_after_minutes?: number;
+  wake_at?: string;
+  at?: string;
 };
 
 export type RunSummary = {
@@ -197,7 +199,7 @@ export async function getDecisions(orderId: string): Promise<Decision[]> {
 export type FinalOutput = {
   order_id: string;
   summary: string;
-  actions_taken: string[];
+  actions_taken: (string | { action?: string; reason?: string; order_id?: string; event_id?: string })[];
   learnings: string[];
   feedback: string[];
   created_at: string;

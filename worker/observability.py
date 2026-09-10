@@ -21,6 +21,7 @@ Then open http://localhost:3002 -> Traces to watch decisions arrive.
 import atexit
 import logging
 import os
+from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,22 @@ def _emit(order_id: str, event: dict, decision: dict, provider: str, usage: dict
     return {"decision": decision, "trace_url": url}
 
 
+def _usage_metadata(usage: object) -> dict:
+    """Normalize gateway usage whether it is a dataclass or a dictionary."""
+    if isinstance(usage, Mapping):
+        value = usage.get
+    else:
+        value = lambda name, default=None: getattr(usage, name, default)
+
+    return {
+        "model": value("model"),
+        "prompt_tokens": value("prompt_tokens"),
+        "completion_tokens": value("completion_tokens"),
+        "latency_ms": round(value("latency_ms", 0) or 0, 1),
+        "fallback_used": value("fallback_used"),
+    }
+
+
 if observe is not None:
     _emit = observe(name="agent-decision")(_emit)
 
@@ -130,13 +147,7 @@ def record_decision(
             return None
 
         if usage:
-            usage = {
-                "model": usage.get("model"),
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens"),
-                "latency_ms": round(usage.get("latency_ms", 0), 1),
-                "fallback_used": usage.get("fallback_used"),
-            }
+            usage = _usage_metadata(usage)
 
         result = _emit(order_id, event, decision, provider, usage or {})
 

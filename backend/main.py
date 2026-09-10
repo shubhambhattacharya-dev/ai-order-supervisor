@@ -1,28 +1,74 @@
 import asyncio
 import json
+import logging
 import os
 
 import psycopg
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from models import CreateRunRequest, InjectEventRequest, InstructionRequest, SupervisorConfig
-from temporal import get_client, workflow_id
+from temporal import get_client, reset_client, workflow_id
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+logger = logging.getLogger("ai-order-supervisor")
 
 app = FastAPI(title="AI Order Supervisor API", version="0.2.0")
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
+    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    origin = request.headers.get("origin")
+    headers = dict(exc.headers or {})
+    if origin:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "*"
+        headers["Access-Control-Allow-Headers"] = "*"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=headers,
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error on %s: %s", request.url.path, exc)
+    origin = request.headers.get("origin")
+    headers = {}
+    if origin:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Access-Control-Allow-Methods"] = "*"
+        headers["Access-Control-Allow-Headers"] = "*"
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"},
+        headers=headers,
+    )
+
 
 TASK_QUEUE = "supervisor-task-queue"
 
@@ -32,22 +78,81 @@ DEFAULT_INSTRUCTION = (
     "sleep between checks, and escalate anything ambiguous."
 )
 
+
 def _workflow_error(exc: Exception) -> HTTPException:
     """Return an actionable status for Temporal workflow operations."""
     detail = str(exc)
-    if "already completed" in detail.lower():
+    detail_lower = detail.lower()
+    if (
+        "already completed" in detail_lower
+        or "already closed" in detail_lower
+        or "workflow execution completed" in detail_lower
+        or "workflow is closed" in detail_lower
+        or "is terminated" in detail_lower
+        or "execution is closed" in detail_lower
+        or "cannot query workflow execution in status" in detail_lower
+    ):
         return HTTPException(
             status_code=409,
             detail="This run has already completed or been cancelled and cannot accept changes.",
         )
-    if "failed state" in detail.lower() or "not ready" in detail.lower():
+    if "failed state" in detail_lower or "not ready" in detail_lower:
         return HTTPException(
             status_code=503,
             detail="This workflow is recovering from a failed task. Try again after restarting the worker.",
         )
-    if "not found" in detail.lower():
+    if "not found" in detail_lower:
         return HTTPException(status_code=404, detail="The requested workflow was not found.")
-    return HTTPException(status_code=502, detail="The workflow service could not complete this request.")
+    if "timeout" in detail_lower or "deadline exceeded" in detail_lower:
+        return HTTPException(
+            status_code=504,
+            detail="The workflow query timed out. The worker may be busy or reloading.",
+        )
+    return HTTPException(status_code=502, detail=f"The workflow service error: {detail}")
+
+
+def _synthesize_terminal_status(order_id: str, status_name: str) -> dict:
+    """When a workflow has completed/terminated, build a valid status object from Postgres."""
+    timeline = []
+    actions_count = 0
+    try:
+        with _db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, order_id, event_id, activity_type, action, reason, created_at
+                    FROM activity_records
+                    WHERE order_id = %s
+                    ORDER BY id ASC
+                    """,
+                    (order_id,),
+                )
+                for r in cur.fetchall():
+                    timeline.append({
+                        "type": "action" if r[4] else "event",
+                        "event_id": r[2],
+                        "action": r[4],
+                        "reason": r[5],
+                        "at": r[6].isoformat(),
+                    })
+                    if r[4]:
+                        actions_count += 1
+    except Exception:
+        pass
+
+    return {
+        "current_state": status_name,
+        "phase": "TERMINAL",
+        "terminal": True,
+        "paused": False,
+        "events_processed": len(timeline),
+        "events_queued": 0,
+        "actions_taken": actions_count,
+        "wakeups": 0,
+        "instructions": 0,
+        "memory": [],
+        "timeline": timeline,
+    }
 
 
 def _db() -> psycopg.Connection:
@@ -70,27 +175,6 @@ async def health():
 async def list_supervisors():
     with _db() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS supervisor_configs (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT UNIQUE NOT NULL,
-                    base_instruction TEXT NOT NULL,
-                    allowed_actions TEXT[] NOT NULL DEFAULT '{}',
-                    default_wake_minutes INT NOT NULL DEFAULT 60,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                )
-                """
-            )
-            cur.execute(
-                """
-                INSERT INTO supervisor_configs (name, base_instruction)
-                VALUES (%s, %s)
-                ON CONFLICT (name) DO NOTHING
-                """,
-                ("Default Ops Supervisor", DEFAULT_INSTRUCTION),
-            )
-            conn.commit()
             cur.execute(
                 """
                 SELECT id, name, base_instruction, allowed_actions,
@@ -204,29 +288,57 @@ async def create_run(req: CreateRunRequest):
 
 @app.get("/runs")
 async def list_runs():
-    client = await get_client()
-    runs = []
-
-    async for wf in client.list_workflows(
-        query="WorkflowType = 'OrderSupervisorWorkflow'",
-    ):
-        runs.append(
-            {
-                "order_id": wf.id.replace("order-supervisor-", ""),
-                "workflow_id": wf.id,
-                "run_id": wf.run_id,
-                "status": (
-                    wf.status.name
-                    if hasattr(wf.status, "name")
-                    else str(wf.status)
-                ),
-                "start_time": wf.start_time.isoformat() if wf.start_time else None,
-            }
-        )
-        if len(runs) >= 20:
-            break
-
-    return {"runs": runs}
+    try:
+        client = await get_client()
+        runs = []
+        async for wf in client.list_workflows(
+            query="WorkflowType = 'OrderSupervisorWorkflow'",
+        ):
+            runs.append(
+                {
+                    "order_id": wf.id.replace("order-supervisor-", ""),
+                    "workflow_id": wf.id,
+                    "run_id": wf.run_id,
+                    "status": (
+                        wf.status.name
+                        if hasattr(wf.status, "name")
+                        else str(wf.status)
+                    ),
+                    "start_time": wf.start_time.isoformat() if wf.start_time else None,
+                }
+            )
+            if len(runs) >= 20:
+                break
+        return {"runs": runs}
+    except Exception:
+        await reset_client()
+        try:
+            client = await get_client()
+            runs = []
+            async for wf in client.list_workflows(
+                query="WorkflowType = 'OrderSupervisorWorkflow'",
+            ):
+                runs.append(
+                    {
+                        "order_id": wf.id.replace("order-supervisor-", ""),
+                        "workflow_id": wf.id,
+                        "run_id": wf.run_id,
+                        "status": (
+                            wf.status.name
+                            if hasattr(wf.status, "name")
+                            else str(wf.status)
+                        ),
+                        "start_time": wf.start_time.isoformat() if wf.start_time else None,
+                    }
+                )
+                if len(runs) >= 20:
+                    break
+            return {"runs": runs}
+        except Exception as retry_exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Temporal service temporarily unavailable: {retry_exc}",
+            )
 
 
 @app.post("/runs/{order_id}/events")
@@ -290,26 +402,51 @@ async def terminate_run(order_id: str):
 
 @app.get("/runs/{order_id}")
 async def run_status(order_id: str):
-    handle = (await get_client()).get_workflow_handle(workflow_id(order_id))
+    client = await get_client()
+    wid = workflow_id(order_id)
+    handle = client.get_workflow_handle(wid)
     try:
         status = await handle.query("status")
+        return {"order_id": order_id, "status": status}
     except Exception as exc:
+        try:
+            desc = await handle.describe()
+            status_name = getattr(desc.status, "name", str(desc.status))
+            if status_name != "RUNNING":
+                return {
+                    "order_id": order_id,
+                    "status": _synthesize_terminal_status(order_id, status_name),
+                }
+        except Exception:
+            pass
         raise _workflow_error(exc)
-    return {"order_id": order_id, "status": status}
 
 
 @app.get("/runs/{order_id}/memory")
 async def run_memory(order_id: str):
-    handle = (await get_client()).get_workflow_handle(workflow_id(order_id))
+    client = await get_client()
+    wid = workflow_id(order_id)
+    handle = client.get_workflow_handle(wid)
     try:
         status = await handle.query("status")
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    return {
-        "order_id": order_id,
-        "memory": status.get("memory", []),
-        "instructions": status.get("instructions", 0),
-    }
+        return {
+            "order_id": order_id,
+            "memory": status.get("memory", []),
+            "instructions": status.get("instructions", 0),
+        }
+    except Exception:
+        try:
+            desc = await handle.describe()
+            status_name = getattr(desc.status, "name", str(desc.status))
+            if status_name != "RUNNING":
+                return {
+                    "order_id": order_id,
+                    "memory": [],
+                    "instructions": 0,
+                }
+        except Exception:
+            pass
+        raise HTTPException(status_code=404, detail="Workflow memory unavailable")
 
 
 @app.get("/runs/{order_id}/decisions")
@@ -444,11 +581,30 @@ async def stream_run(order_id: str):
                     {"order_id": order_id, "status": status or {}}
                 )
             except Exception:
-                payload = json.dumps({"order_id": order_id, "status": None})
+                try:
+                    handle = (await get_client()).get_workflow_handle(
+                        workflow_id(order_id)
+                    )
+                    desc = await handle.describe()
+                    status_name = getattr(desc.status, "name", str(desc.status))
+                    if status_name != "RUNNING":
+                        status = _synthesize_terminal_status(order_id, status_name)
+                        payload = json.dumps({"order_id": order_id, "status": status})
+                    else:
+                        payload = json.dumps({"order_id": order_id, "status": None})
+                        status = None
+                except Exception:
+                    payload = json.dumps({"order_id": order_id, "status": None})
+                    status = None
 
             if payload != last_payload:
                 last_payload = payload
                 yield f"data: {payload}\n\n"
+
+            # Stop streaming once the workflow has reached a terminal state.
+            if isinstance(status, dict) and status.get("terminal"):
+                return
+
             await asyncio.sleep(2)
 
     return StreamingResponse(

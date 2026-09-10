@@ -25,7 +25,7 @@ class Gateway:
             started = time.perf_counter()
 
             try:
-                content = await adapter.complete(spec)
+                content, usage_info = await adapter.complete(spec)
                 latency_ms = (time.perf_counter() - started) * 1000
 
                 return ChatResult(
@@ -33,8 +33,8 @@ class Gateway:
                     usage=Usage(
                         provider=adapter.name,
                         model=getattr(adapter, "model", "fake"),
-                        prompt_tokens=spec.max_tokens,
-                        completion_tokens=len(content) // 4,
+                        prompt_tokens=usage_info.get("prompt_tokens", 0),
+                        completion_tokens=usage_info.get("completion_tokens", 0),
                         latency_ms=latency_ms,
                         fallback_used=index > 0,
                     ),

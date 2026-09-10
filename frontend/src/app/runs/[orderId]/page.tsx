@@ -40,6 +40,8 @@ export default function RunDetailPage() {
   const [eventType, setEventType] = useState("SHIPMENT_DELAYED");
   const [payload, setPayload] = useState("{}");
   const [payloadError, setPayloadError] = useState<string | null>(null);
+  const [customEventId, setCustomEventId] = useState("");
+  const [lastSent, setLastSent] = useState<{ id: string; type: string; payload: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [instruction, setInstruction] = useState("");
   const [toast, setToast] = useState<string | null>(null);
@@ -88,8 +90,24 @@ export default function RunDetailPage() {
     catch { setPayloadError("Use valid JSON before sending this event."); return; }
     setPayloadError(null); setBusy(true);
     try {
-      const result = await injectEvent(orderId, `evt-${Date.now()}`, eventType, JSON.stringify(parsed));
-      flash(result.ok ? `${eventType.replace(/_/g, " ")} sent` : await apiErrorMessage(result, `Inject failed (${result.status})`));
+      const eid = customEventId.trim() || (typeof parsed.event_id === "string" && parsed.event_id.trim() ? parsed.event_id.trim() : `evt-${Date.now()}`);
+      const result = await injectEvent(orderId, eid, eventType, JSON.stringify(parsed));
+      if (result.ok) {
+        setLastSent({ id: eid, type: eventType, payload });
+        setCustomEventId("");   // fresh ID next click — no accidental dedup
+      }
+      flash(result.ok ? `${eventType.replace(/_/g, " ")} sent (${eid})` : await apiErrorMessage(result, `Inject failed (${result.status})`));
+      if (result.ok) refresh();
+    } catch { flash("Backend is not reachable."); }
+    setBusy(false);
+  }
+
+  async function sendDuplicate() {
+    if (!lastSent || busy) return;
+    setBusy(true);
+    try {
+      const result = await injectEvent(orderId, lastSent.id, lastSent.type, lastSent.payload);
+      flash(result.ok ? `Duplicate ${lastSent.id} sent — dropped as [DEDUP]` : await apiErrorMessage(result, `Inject failed (${result.status})`));
       if (result.ok) refresh();
     } catch { flash("Backend is not reachable."); }
     setBusy(false);
@@ -125,7 +143,9 @@ export default function RunDetailPage() {
     );
   }
 
-  const entries: TimelineEntry[] = [...(status?.timeline ?? [])].reverse();
+  // The workflow records event → decision → action in chronological order.
+  // Keep that order in the console so each causal chain reads naturally.
+  const entries: TimelineEntry[] = status?.timeline ?? [];
   const shown = kindFilter === "all" ? entries : entries.filter((e) => e.type === kindFilter);
   const totalTokens = decisions.reduce((sum, d) => sum + d.prompt_tokens + d.completion_tokens, 0);
   const runningFor = (() => {
@@ -186,6 +206,12 @@ export default function RunDetailPage() {
         <p className="text-sm text-sub">
           Waiting for new events or scheduled wake-up — the durable timer fires on its
           own, even if this server restarts.
+        </p>
+      )}
+      {status && !status.sleeping && !status.paused && !status.terminal && (
+        <p className="text-sm text-sub">
+          Waiting for the first order event. A scheduled wake-up starts after the
+          supervisor has handled an event.
         </p>
       )}
 
@@ -260,10 +286,7 @@ export default function RunDetailPage() {
                 {shown.map((entry, i) => {
                   const kind = entry.type === "decision" ? "decision" : entry.type === "action" ? "action" : "event";
                   const decisionInfo = kind === "decision"
-                    ? decisions.filter((d) => d.action === entry.action).reverse()[
-                        entries.filter((e) => e.type === "decision" && e.action === entry.action).length - 1 -
-                        [...entries].slice(0, i).filter((e) => e.type === "decision" && e.action === entry.action).length
-                      ]
+                    ? decisions.find((d) => d.event_id === entry.event_id)
                     : undefined;
                   const isSleep = entry.action === "sleep_until";
                   const Icon = kind === "decision"
@@ -274,27 +297,29 @@ export default function RunDetailPage() {
                     : FileText;
                   return (
                     <li key={`${entry.type}-${i}-${entry.event_id ?? entry.action}`} className="timeline-item">
-                      <time>{status?.started_at ? new Date(new Date(status.started_at).getTime() + i * 60000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Now"}</time>
+                      <time>{entry.at ? new Date(entry.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—"}</time>
                       <div className={`timeline-dot ${kind}`}><Icon size={17} /></div>
                       <div className="min-w-0 flex-1 pb-6">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="font-medium">
                             {kind === "event"
-                              ? `Event received: ${entry.event_type?.toLowerCase()}`
+                              ? (entry.reason?.includes("[DEDUP]")
+                                  ? `Duplicate event dropped: ${entry.event_id}`
+                                  : `Event received: ${entry.event_type?.toLowerCase()}`)
                               : isSleep ? "Supervisor sleeping"
                               : kind === "decision" ? `Agent decision: ${entry.action}`
                               : `Action executed: ${entry.action}`}
                           </p>
-                          <span className={`event-tag ${kind}`}>
-                            {isSleep ? "STATE" : kind.toUpperCase()}
+                          <span className={`event-tag ${kind} ${entry.reason?.includes("[DEDUP]") ? "!bg-amber-500/15 !text-amber-500 border border-amber-500/30" : ""}`}>
+                            {entry.reason?.includes("[DEDUP]") ? "DEDUP" : isSleep ? "STATE" : kind.toUpperCase()}
                           </span>
                         </div>
                         <p className="mt-1 text-sm text-sub">{entry.reason ?? "No additional detail recorded."}</p>
-                        {isSleep && status?.next_wake_at && (
+                        {isSleep && entry.wake_at && (
                           <div className="mt-2 rounded-lg border border-line bg-panelsoft px-3 py-2 text-xs">
                             <p><span className="text-sub">Reason:</span> {entry.reason ?? "waiting"}</p>
                             <p><span className="text-sub">Wake-up at:</span>{" "}
-                              {new Date(status.next_wake_at).toLocaleString()}</p>
+                              {new Date(entry.wake_at).toLocaleString()}</p>
                           </div>
                         )}
                         {kind === "decision" && decisionInfo && !isSleep && (
@@ -326,17 +351,34 @@ export default function RunDetailPage() {
                 </div>
               </div>
               <label className="field-label">Event type</label>
-              <select value={eventType} onChange={(e) => setEventType(e.target.value)} className="field-control">
+              <select value={eventType} onChange={(e) => { setEventType(e.target.value); setCustomEventId(""); }} className="field-control">
                 {EVENT_TYPES.map((t) => <option key={t} value={t}>{t.toLowerCase()}</option>)}
               </select>
+              <label className="field-label mt-3">Event ID (optional — test deduplication)</label>
+              <input
+                value={customEventId}
+                onChange={(e) => setCustomEventId(e.target.value)}
+                placeholder="e.g. evt-dedup-1 (auto-generated if blank)"
+                className="field-control font-mono text-xs"
+              />
               <label className="field-label mt-3">Event payload (JSON)</label>
               <textarea value={payload} onChange={(e) => setPayload(e.target.value)} rows={4} spellCheck={false}
                 className="field-control font-mono text-xs" />
               {payloadError && <p className="mt-1 text-xs text-danger">{payloadError}</p>}
-              <button onClick={sendEvent} disabled={busy}
-                className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-brand px-4 py-2.5 text-sm font-medium text-white hover:bg-brandhover disabled:opacity-50">
-                <Send size={15} /> {busy ? "Sending…" : "Send signal"}
-              </button>
+              <div className="mt-3 flex flex-col gap-2">
+                <button onClick={sendEvent} disabled={busy}
+                  className="flex w-full items-center justify-center gap-2 rounded-lg bg-brand px-4 py-2.5 text-sm font-medium text-white hover:bg-brandhover disabled:opacity-50">
+                  <Send size={15} /> {busy ? "Sending…" : "Send signal"}
+                </button>
+                {lastSent && (
+                  <button onClick={sendDuplicate} disabled={busy}
+                    type="button"
+                    title="Resend the exact same event with the exact same event_id to test deduplication"
+                    className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-medium text-amber-500 hover:bg-amber-500/20 disabled:opacity-50">
+                    <RefreshCw size={13} /> Re-send Duplicate ({lastSent.id})
+                  </button>
+                )}
+              </div>
             </section>
 
             <section className="panel p-5">
@@ -438,7 +480,9 @@ export default function RunDetailPage() {
               <div>
                 <h2 className="mb-1 text-sm font-medium text-sub">Actions taken</h2>
                 <ul className="list-disc space-y-1 pl-5 text-sm">
-                  {(finalOut.actions_taken ?? []).map((a, i) => <li key={i}>{a}</li>)}
+                  {(finalOut.actions_taken ?? []).map((a, i) => (
+                    <li key={i}>{typeof a === "string" ? a : `${a.action ?? "unknown"}: ${a.reason ?? "no reason"}`}</li>
+                  ))}
                 </ul>
               </div>
               <div>
@@ -469,4 +513,3 @@ export default function RunDetailPage() {
     </div>
   );
 }
-

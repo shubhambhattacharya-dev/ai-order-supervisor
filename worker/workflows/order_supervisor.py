@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import json
 from datetime import timedelta
 
@@ -7,6 +6,22 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from policies.wake_policy import should_wake
+
+DEFAULT_WAKE_MINUTES = 2
+
+
+def _event_detail(event: dict) -> str:
+    """Create a compact, safe timeline summary from an event payload."""
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or not payload:
+        return "No payload provided."
+
+    reason = payload.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason.strip()[:240]
+
+    summary = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"Payload received: {summary[:240]}"
 
 
 @workflow.defn
@@ -33,7 +48,6 @@ class OrderSupervisorWorkflow:
 
         try:
             self.started_at = workflow.now().isoformat()
-
             while not self.terminal:
                 if self.paused:
                     await workflow.wait_condition(
@@ -73,6 +87,23 @@ class OrderSupervisorWorkflow:
                 len(self.processed_event_ids),
                 len(self.actions_taken),
             )
+            try:
+                await asyncio.shield(
+                    workflow.execute_activity(
+                        "final_output",
+                        args=[
+                            order_id,
+                            self.memory,
+                            self.actions_taken,
+                        ],
+                        start_to_close_timeout=timedelta(seconds=45),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                )
+            except Exception:
+                workflow.logger.exception(
+                    "[CONTROL] final_output failed during termination"
+                )
             raise
 
         except Exception:
@@ -93,23 +124,6 @@ class OrderSupervisorWorkflow:
                         "order_id": order_id,
                         "event": event,
                     },
-                )
-                continue
-
-            wake_now, why = should_wake(event)
-            if not wake_now:
-                self.timeline.append(
-                    {
-                        "type": "event",
-                        "event_id": event_id,
-                        "event_type": event_type,
-                    }
-                )
-                self.memory.append(
-                    {"event_type": event_type, "reason": why}
-                )
-                workflow.logger.info(
-                    "[POLICY] %s logged-only: %s", event_id, why
                 )
                 continue
 
@@ -153,12 +167,20 @@ class OrderSupervisorWorkflow:
         action = decision.get("action")
         reason = decision.get("reason", "")
 
+        wake_at = None
+        if action == "sleep_until":
+            wake_at = self._schedule_wake(
+                int(decision.get("wake_after_minutes", DEFAULT_WAKE_MINUTES))
+            )
+
         # Add the event to the timeline.
         self.timeline.append(
             {
                 "type": "event",
                 "event_id": event["event_id"],
                 "event_type": event_type,
+                "reason": _event_detail(event),
+                "at": workflow.now().isoformat(),
             }
         )
 
@@ -169,10 +191,13 @@ class OrderSupervisorWorkflow:
             "event_type": event_type,
             "action": action,
             "reason": reason,
+            "at": workflow.now().isoformat(),
         }
 
         if decision.get("wake_after_minutes") is not None:
             decision_entry["wake_after_minutes"] = decision["wake_after_minutes"]
+        if wake_at is not None:
+            decision_entry["wake_at"] = wake_at
 
         self.timeline.append(decision_entry)
 
@@ -185,18 +210,11 @@ class OrderSupervisorWorkflow:
         )
 
         if action == "no_action":
+            if event_type not in {"COMPLETED", "CANCELLED"}:
+                self._schedule_wake(DEFAULT_WAKE_MINUTES)
             return
 
         if action == "sleep_until":
-            wake_minutes = int(
-                decision.get("wake_after_minutes", 30)
-            )
-
-            self.wake_seconds = wake_minutes * 60
-            self.wake_deadline = (
-                workflow.now() + timedelta(seconds=self.wake_seconds)
-            ).isoformat()
-
             return
 
         record = await workflow.execute_activity(
@@ -216,8 +234,11 @@ class OrderSupervisorWorkflow:
         self.timeline.append(
             {
                 "type": "action",
+                "event_id": event["event_id"],
+                "event_type": event_type,
                 "action": action,
                 "reason": reason,
+                "at": workflow.now().isoformat(),
             }
         )
 
@@ -227,52 +248,60 @@ class OrderSupervisorWorkflow:
                 "reason": reason,
             }
         )
+        # A business action is followed by a durable recheck. The old code
+        # discarded the follow-up interval and left the workflow waiting for a
+        # signal forever.
+        self._schedule_wake(DEFAULT_WAKE_MINUTES)
+
+    def _schedule_wake(self, minutes: int) -> str:
+        self.wake_seconds = max(1, minutes) * 60
+        self.wake_deadline = (
+            workflow.now() + timedelta(seconds=self.wake_seconds)
+        ).isoformat()
+        return self.wake_deadline
 
     async def _wait_for_event_or_wake(
         self,
         order_id: str,
     ) -> None:
-        timer = None
-
-        if self.wake_seconds is not None:
-            timer = asyncio.create_task(
-                workflow.sleep(self.wake_seconds)
+        if self.wake_seconds is None:
+            await workflow.wait_condition(
+                lambda: bool(self.events) or self.terminal
             )
-            self.wake_seconds = None
-
-        await workflow.wait_condition(
-            lambda: bool(self.events)
-            or self.terminal
-            or (timer is not None and timer.done())
-        )
-
-        if timer is None:
             return
 
-        if timer.done():
+        wait_seconds = self.wake_seconds
+        self.wake_seconds = None
+        timer_fired = False
+
+        try:
+            # Temporal creates and owns this timer. It survives worker/server
+            # restarts and wakes this workflow either when a signal arrives or
+            # exactly when the timeout expires.
+            await workflow.wait_condition(
+                lambda: bool(self.events) or self.terminal,
+                timeout=timedelta(seconds=wait_seconds),
+                timeout_summary="order-supervisor-scheduled-wake",
+            )
+        except asyncio.TimeoutError:
+            timer_fired = True
+        finally:
+            self.wake_deadline = None
+
+        if timer_fired:
             self.wakeups += 1
 
-            self.events.append(
-                {
-                    "event_id": f"wakeup-{self.wakeups}",
-                    "type": "SCHEDULED_WAKEUP",
-                    "payload": {
-                        "wakeup_number": self.wakeups,
-                    },
-                }
-            )
+            wake_event = {
+                "event_id": f"wakeup-{self.wakeups}",
+                "type": "SCHEDULED_WAKEUP",
+                "payload": {"wakeup_number": self.wakeups},
+            }
+            self.processed_event_ids.add(wake_event["event_id"])
+            self.events.append(wake_event)
 
             workflow.logger.info(
                 "[WAKEUP] scheduled wake-up #%d fired", self.wakeups
             )
-
-        else:
-            timer.cancel()
-
-            with contextlib.suppress(asyncio.CancelledError):
-                await timer
-
-        self.wake_deadline = None
 
     @workflow.query
     def status(self) -> dict:
@@ -305,9 +334,37 @@ class OrderSupervisorWorkflow:
             workflow.logger.info(
                 "[DEDUP] %s duplicate ignored", event_id
             )
+            self.timeline.append(
+                {
+                    "type": "event",
+                    "event_id": event_id,
+                    "event_type": event.get("type"),
+                    "reason": f"[DEDUP] Duplicate {event_id} ignored; workflow continues sleeping.",
+                    "at": workflow.now().isoformat(),
+                }
+            )
             return
 
         self.processed_event_ids.add(event_id)
+        wake_now, why = should_wake(event)
+        if not wake_now:
+            # Routine updates are retained in the audit trail but must not
+            # interrupt the currently scheduled durable timer.
+            self.timeline.append(
+                {
+                    "type": "event",
+                    "event_id": event_id,
+                    "event_type": event.get("type"),
+                    "reason": why,
+                    "at": workflow.now().isoformat(),
+                }
+            )
+            self.memory.append(
+                {"event_type": event.get("type"), "reason": why}
+            )
+            workflow.logger.info("[POLICY] %s logged-only: %s", event_id, why)
+            return
+
         self.events.append(event)
 
         workflow.logger.info(

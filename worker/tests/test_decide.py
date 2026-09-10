@@ -19,7 +19,7 @@ class TestDecisionTable:
             }, f"{event_type} maps to non-allowed action {action}"
 
     def test_unknown_event_is_noted_not_slept(self):
-        assert DEFAULT_DECISION == ("create_internal_note", 60)
+        assert DEFAULT_DECISION == ("create_internal_note", 2)  # 2-min demo default
 
     @pytest.mark.parametrize(
         "event_type,expected_action",

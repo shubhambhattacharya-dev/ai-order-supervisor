@@ -49,9 +49,12 @@ class TestChainWalk:
 class TestAdapterContract:
     def test_fake_pops_then_repeats(self):
         fa = FakeAdapter([VALID, INVALID])
-        assert json.loads(run(fa.complete(SPEC)))["action"] == "message_payments_team"
-        assert json.loads(run(fa.complete(SPEC)))["action"] == "refund_customer"
-        assert json.loads(run(fa.complete(SPEC)))["action"] == "refund_customer"
+        content1, _ = run(fa.complete(SPEC))
+        assert json.loads(content1)["action"] == "message_payments_team"
+        content2, _ = run(fa.complete(SPEC))
+        assert json.loads(content2)["action"] == "refund_customer"
+        content3, _ = run(fa.complete(SPEC))
+        assert json.loads(content3)["action"] == "refund_customer"
 
     def test_invalid_response_fails_validation(self):
         with pytest.raises(ValueError):

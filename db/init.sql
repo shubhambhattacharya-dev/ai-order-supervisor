@@ -25,10 +25,20 @@ CREATE TABLE IF NOT EXISTS decisions (
     completion_tokens INT DEFAULT 0,
     latency_ms NUMERIC(10,1) DEFAULT 0,
     fallback_used BOOLEAN DEFAULT FALSE,
+    trace_url TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_decisions_order ON decisions(order_id);
+
+CREATE TABLE IF NOT EXISTS supervisor_configs (
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    base_instruction TEXT NOT NULL,
+    allowed_actions TEXT[] NOT NULL DEFAULT '{}',
+    default_wake_minutes INT NOT NULL DEFAULT 60,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 CREATE TABLE IF NOT EXISTS final_outputs (
     id BIGSERIAL PRIMARY KEY,
