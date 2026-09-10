@@ -161,6 +161,20 @@ class OrderSupervisorWorkflow:
             }
         )
 
+        # Every decision is recorded: EVENT -> DECISION -> ACTION.
+        decision_entry = {
+            "type": "decision",
+            "event_id": event["event_id"],
+            "event_type": event_type,
+            "action": action,
+            "reason": reason,
+        }
+
+        if decision.get("wake_after_minutes") is not None:
+            decision_entry["wake_after_minutes"] = decision["wake_after_minutes"]
+
+        self.timeline.append(decision_entry)
+
         # Add important event information to memory.
         self.memory.append(
             {
@@ -170,13 +184,6 @@ class OrderSupervisorWorkflow:
         )
 
         if action == "no_action":
-            self.timeline.append(
-                {
-                    "type": "decision",
-                    "action": "no_action",
-                    "reason": reason,
-                }
-            )
             return
 
         if action == "sleep_until":
@@ -189,14 +196,6 @@ class OrderSupervisorWorkflow:
                 workflow.now() + timedelta(seconds=self.wake_seconds)
             ).isoformat()
 
-            self.timeline.append(
-                {
-                    "type": "decision",
-                    "action": "sleep_until",
-                    "wake_after_minutes": wake_minutes,
-                    "reason": reason,
-                }
-            )
             return
 
         record = await workflow.execute_activity(
