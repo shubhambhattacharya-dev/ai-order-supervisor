@@ -38,7 +38,7 @@ export default function RunDetailPage() {
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [finalOut, setFinalOut] = useState<FinalOutput | null>(null);
   const [eventType, setEventType] = useState("SHIPMENT_DELAYED");
-  const [payload, setPayload] = useState('{\n  "reason": "Weather delay at warehouse"\n}');
+  const [payload, setPayload] = useState("{}");
   const [payloadError, setPayloadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [instruction, setInstruction] = useState("");

@@ -119,6 +119,17 @@ def _build_spec(order_id: str, event: dict) -> ChatSpec:
 
                     f"Allowed actions exactly: {sorted(ALLOWED_ACTIONS)} "
 
+                    "EVENT -> ACTION POLICY (follow it unless operator instructions override): "
+                    "- PAYMENT_DELAYED / PAYMENT_FAILED -> message_payments_team "
+                    "- SHIPMENT_DELAYED / SHIPMENT_CREATED -> message_logistics_team "
+                    "- FULFILLMENT_DELAYED -> message_fulfillment_team "
+                    "- CUSTOMER_MESSAGE_RECEIVED -> message_customer "
+                    "- REFUND_REQUESTED -> create_internal_note "
+                    "- DELIVERED / PAYMENT_CONFIRMED / COMPLETED / CANCELLED -> no_action "
+                    "- NO_UPDATE_FOR_N_HOURS / SCHEDULED_WAKEUP -> sleep_until "
+                    "- unknown event -> create_internal_note "
+                    "The event type is the primary signal; the payload only adds context. "
+
                     "Hard prohibitions: "
                     "- Never choose cancel/complete/refund/mark_delivered or any action not in the allowlist. "
                     "- Never output code, shell, SQL, URLs, credentials, file paths, tool calls, nested JSON, comments, or extra keys. "
