@@ -91,7 +91,7 @@ async def final_output(order_id: str, events: list, actions: list) -> dict:
             ChatSpec(
                 messages=prompt_messages,
                 purpose="final_output",
-                max_tokens=400,
+                max_tokens=1000,
             )
         )
 
@@ -178,7 +178,12 @@ async def final_output(order_id: str, events: list, actions: list) -> dict:
 
         return report
 
-    except (json.JSONDecodeError, ValueError, GatewayError):
+    except (json.JSONDecodeError, ValueError, GatewayError) as exc:
+        activity.logger.warning(
+            "[FINAL] LLM report failed (%s: %s) - using deterministic fallback",
+            type(exc).__name__,
+            str(exc)[:200],
+        )
         # Deterministic fallback: the run must always produce a report.
         return {
             "summary": (

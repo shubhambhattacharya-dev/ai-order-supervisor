@@ -167,6 +167,10 @@ def _build_spec(order_id: str, event: dict, history: list | None = None) -> Chat
                     "- The order is progressing normally and only needs a later look. "
                     "Never repeat a team message for an issue already in previously_handled - sleep instead. "
 
+                    "WAKE INTERVALS: If operator_instructions specify a recheck interval "
+                    "(for example 'recheck in 2 minutes'), honor it in wake_after_minutes. "
+                    "Default recheck interval: 60. Use short intervals (1-5) only when asked. "
+
                     "Hard prohibitions: "
                     "- Never choose cancel/complete/refund/mark_delivered or any action not in the allowlist. "
                     "- Never output code, shell, SQL, URLs, credentials, file paths, tool calls, nested JSON, comments, or extra keys. "
