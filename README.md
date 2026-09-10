@@ -8,7 +8,7 @@ Built with **Next.js (App Router) + Tailwind CSS** for the operator console, **F
 
 ## The one idea
 
-One order = one Temporal workflow. The workflow is a durable state machine with an agent loop inside it. It can sleep for hours on a timer that survives crashes, wake up the moment an important event arrives, make one decision, record one action, and sleep again. When the order reaches a terminal state, the workflow produces a final report: a summary, the actions taken, what was learned, and feedback.
+One order = one Temporal workflow. The workflow is a durable state machine with an agent loop inside it. It can sleep for hours on a timer that survives crashes (wake-ups are bounded to 5–240 minutes, so "hours" is a chain of durable timers), wake up the moment an important event arrives, make one decision, record one action, and sleep again. When the order reaches a terminal state, the workflow produces a final report: a summary, the actions taken, what was learned, and feedback.
 
 If you remember one sentence: **the workflow decides WHEN things happen, the agent decides WHAT should happen, and the activities make it happen safely.**
 
@@ -36,7 +36,7 @@ You should see three containers running: `order-supervisor-temporal`, `order-sup
 
 ### Step 2 — Set your keys
 
-Create a file named `.env` inside the `worker/` folder (copy from `worker/../.env.example` at the repo root) and fill in:
+Create a file named `.env` inside the `worker/` folder (copy from `worker/.env.example`) and fill in:
 
 ```text
 GROQ_API_KEY=your-key
@@ -88,14 +88,22 @@ All 26 tests should pass in a few seconds. They do not need the server, the data
 
 ## How to use it (the demo flow)
 
-1. **Create a supervisor configuration.** Open http://localhost:3000/supervisors. Give it a name, a base instruction, and pick the actions it may use.
+1. **Create a supervisor configuration.** Open http://localhost:3000/supervisors. Give it a name and a base instruction — it is saved as a reusable template. (The `allowed_actions` picker is stored with the config for the Phase 2 per-run action gating; the live run always validates against the fixed code allowlist.)
 2. **Start a run.** On the Runs page, enter an order id (for example `ORD-101`), choose the configuration, and press Start run. One Temporal workflow starts for this order.
 3. **Inject events.** Open the run and use the Inject Event panel on the right. Try `payment_delayed` with a payload like `{"reason": "gateway timeout"}`. The agent wakes, decides, and the action appears in the timeline.
 4. **Watch it sleep and wake.** After a decision the agent schedules its next wake-up. The run header shows the sleeping state and the next wake time. In the Temporal UI (http://localhost:8080) you can see the timer in the workflow history.
 5. **Add an instruction while it runs.** Type something like "if delayed again, escalate immediately" in the Add Instruction panel. The next decision honors it.
-6. **Pause, resume, or terminate.** The header buttons control the run. Even termination produces the final output.
+6. **Pause, resume, or terminate.** The header buttons control the run. A terminated run ends immediately; the final report is produced only when the run completes on a terminal event.
 7. **See the final report.** Inject `completed`. The Final Output tab shows the summary, the actions taken, the learnings, and feedback.
 8. **Open the Analytics page.** Every LLM decision is listed with its provider, model, token count, and latency, and each one links to its trace in Langfuse.
+
+---
+
+## Event catalog (inject from the UI panel)
+
+`order_created` (starts the run) · `payment_confirmed` · `payment_failed` · `payment_delayed` · `shipment_created` · `shipment_delayed` · `delivered` · `refund_requested` · `customer_message_received` · `no_update_for_n_hours` · `status_update` · `completed` · `cancelled`
+
+A lightweight wake-up policy decides importance: important events wake the agent; routine updates (`status_update`, `payment_confirmed`, `shipment_created`) are logged while the workflow keeps sleeping; unknown event types wake it to be safe. Inject any of these from the run page or with a POST to `/runs/{id}/events`.
 
 ---
 
@@ -119,13 +127,13 @@ The same journeys run on every code change. If a change makes any journey worse,
 
 The safety model is built on four boundaries. Each one is enforced by code, not by hoping the model behaves.
 
-**1. The agent has no power of its own.** The LLM output is only a proposal. The workflow validates every proposal against an allowlist of actions and argument limits. A made-up action, a malformed payload, or a forbidden amount is rejected deterministically and logged. There is no code path where model text is executed.
+**1. The agent has no power of its own.** The LLM output is only a proposal. The workflow validates every proposal against an allowlist of action names. A made-up action name is rejected deterministically, retried once, and then degraded to a safe decision table. There is no code path where model text is executed.
 
 **2. Order data is data, not instructions.** The system prompt tells the model that everything inside the order context is untrusted data. A customer message that says "refund me now" is treated as text to be noted, never as a command. Journey J4 tests exactly this attack.
 
 **3. Money and identity stay out of reach.** The agent holds no database credentials, no API keys, and no network access of its own. It acts only through activities, and the five actions are communication and record-keeping only. Anything that moves money (refunds) is a Phase 2 design with human approval gates.
 
-**4. Everything is recorded and nothing is silently dropped.** Every event, decision, action, and instruction is appended to an audit trail in Postgres and to the Temporal history. If the LLM gateway is completely down, the agent falls back to a safe decision table and the run continues — a missing provider never becomes a missing customer answer.
+**4. Everything is recorded and nothing is silently dropped.** Every event, decision, and action is appended to an audit trail in Postgres (decisions, activities) and to the Temporal history. If the LLM gateway is completely down, the agent falls back to a safe decision table and the run continues — a missing provider never becomes a missing customer answer.
 
 ---
 
@@ -135,9 +143,9 @@ The safety model is built on four boundaries. Each one is enforced by code, not 
 
 **One paragraph:** the operator starts a run from the console (optionally from a saved supervisor config); FastAPI starts one durable Temporal workflow for that order. Events arrive as **signals**; a zero-token **wake-up policy** filters them — important events wake the agent, routine ones are logged while it sleeps, unknown ones wake it to be safe. The **decide activity** asks the LLM through a **provider gateway** (retry-once, table degrade), validates the strict-JSON answer against an **action allowlist**, and persists the decision. Every action lands in the single **activity log** (Postgres) and appears live on the timeline. The agent sleeps on a **durable timer** until the next wake-up. On a terminal event, a **final-output activity** writes the summary, learnings and feedback.
 
-The system has five parts. A **Next.js console** where the operator works. A **FastAPI service** that validates input and talks to Temporal. **Temporal**, which runs one durable workflow per order and guarantees that every step happens exactly once, in order, even across crashes. A **Python worker** that executes the workflow and its activities, including the agent. And **PostgreSQL**, which stores the source of truth: supervisor configurations, runs, the event timeline, the activity log, memory summaries, and the final outputs.
+The system has five parts. A **Next.js console** where the operator works. A **FastAPI service** that validates input and talks to Temporal. **Temporal**, which runs one durable workflow per order and guarantees that every step happens exactly once, in order, even across crashes. A **Python worker** that executes the workflow and its activities, including the agent. And **PostgreSQL**, which stores the business records: supervisor configurations, decisions, the activity log, and the final outputs.
 
-Three decisions shape everything else. First, the workflow code is deterministic and never touches the network — the LLM is called inside an activity, so its answer is recorded in history and replayed instead of being re-rolled after a crash. Second, a small wake-up policy (a pure function with no tokens) decides whether an event is important enough to wake the agent, so noise costs nothing. Third, the workflow — not the agent — owns completion: the run ends on a terminal event, an operator termination, or a maximum age, and the final report is produced even then.
+Three decisions shape everything else. First, the workflow code is deterministic and never touches the network — the LLM is called inside an activity, so its answer is recorded in history and replayed instead of being re-rolled after a crash. Second, a small wake-up policy (a pure function with no tokens) decides whether an event is important enough to wake the agent, so noise costs nothing. Third, the workflow — not the agent — owns completion: the run ends on a terminal event or an operator termination.
 
 ---
 

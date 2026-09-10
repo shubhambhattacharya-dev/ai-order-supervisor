@@ -11,10 +11,10 @@ Stack: Next.js (App Router) + Tailwind · FastAPI · Temporal Python SDK · Post
 | Component | Stack | Responsibility |
 |---|---|---|
 | Operator console | Next.js, Tailwind | Supervisor configs, start runs, live timeline, inject events, instructions, pause/resume/terminate |
-| API service | FastAPI | Validation, start/signal/query workflows, event generator endpoints, Postgres access |
+| API service | FastAPI | Validation, start/signal/query workflows, run and event endpoints, Postgres access |
 | Temporal server | temporalio/auto-setup (Docker) | Durable execution: timers, retries, replay, history |
 | Agent worker | Python, temporalio | Workflow (deterministic) + activities: decide, record actions, final output |
-| PostgreSQL | Postgres 16 | Configs, runs, event timeline, activity log, memory, final outputs |
+| PostgreSQL | Postgres 16 | Supervisor configs, decisions, activity log, final outputs |
 
 ## 3. The pattern stack
 
@@ -25,26 +25,26 @@ Stack: Next.js (App Router) + Tailwind · FastAPI · Temporal Python SDK · Post
 5. **Tool registry / command pattern** — the model proposes; the registry validates the action against an allowlist and bounds before any activity runs.
 6. **Durable timer (sleep)** — "wake me in 60 minutes" is a Temporal timer: zero compute while asleep, survives restarts; an arriving event cancels the pending timer.
 7. **Append-only event/decision log** — timeline and activity records are INSERT-only; every action is explainable and replayable.
-8. **Idempotency** — activity retries are at-least-once; action records are keyed so retries are harmless.
-9. **Bounded context / memory compaction** — the prompt is snapshot + recent events + compact summary; history grows in Postgres, never in the prompt.
+8. **Idempotency** — activity retries are at-least-once; event IDs are deduplicated by the workflow, so a redelivered signal is ignored. (Activity records do not carry a uniqueness key yet — Phase 2.)
+9. **Bounded context / memory** — the prompt carries the current event and the run's instructions; history lives in the workflow's timeline and memory lists (exposed via the status query), and decisions/actions in Postgres — the prompt never grows with the full history.
 10–13 (advanced, designed in the full design document): human-in-the-loop gates, continue-as-new, model routing/cost optimization, evaluation/replay.
 
 ## 4. The agent loop
 
 1. Drain signals (dedup by event ID).
 2. Wake policy: important → decide now; routine → log and keep sleeping; unknown → wake to be safe.
-3. Deterministic pre-checks (paused? budget left?).
-4. **Decide activity** — strict JSON: actions from the allowlist, optional memory refresh, sleep recommendation, reasoning. Malformed output retries once, then degrades.
+3. Deterministic pre-checks (paused? terminal?).
+4. **Decide activity** — strict JSON: an action from the allowlist, optional wake-up, reasoning. Malformed output retries once, then degrades to the safe decision table.
 5. **Act activities** — each action becomes an activity record (single activity log) and lands on the timeline.
 6. Update memory, schedule the next durable timer, sleep.
-7. On a terminal event / termination / max age: a **final-output activity** produces the summary, actions taken, learnings and feedback.
+7. On a terminal event or operator termination: a **final-output activity** produces the summary, actions taken, learnings and feedback (on a terminal event the report is persisted and returned; a terminated run logs its final counts).
 
 The five business actions (brief): `message_fulfillment_team`, `message_payments_team`, `message_logistics_team`, `message_customer`, `create_internal_note` — each persisted as an activity record. Runtime capability: `sleep_until` (durable timer). Memory compaction and reasoning records are designed in the full design document as Phase 2.
 
 ## 5. Cost and safety
 
 - Wake-on-event beats polling by ~100x; a watchdog wake that finds nothing sleeps again without calling the LLM.
-- Per-run token budgets with a circuit breaker: over budget, the agent stops deciding and escalates — a human is the fallback, never an infinite loop.
+- Per-run token budgets with a circuit breaker are **designed but not implemented** in this POC (Phase 2): over budget, the agent stops deciding and escalates — a human is the fallback, never an infinite loop.
 - The agent holds no credentials: it only proposes allowlisted actions; model output is untrusted input; the audit trail is append-only.
 
 ## 6. Scaling path
