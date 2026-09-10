@@ -8,7 +8,7 @@ Built with **Next.js (App Router) + Tailwind CSS** for the operator console, **F
 
 ## The one idea
 
-One order = one Temporal workflow. The workflow is a durable state machine with an agent loop inside it. It can sleep for hours on a timer that survives crashes (wake-ups are bounded to 5–240 minutes, so "hours" is a chain of durable timers), wake up the moment an important event arrives, make one decision, record one action, and sleep again. When the order reaches a terminal state, the workflow produces a final report: a summary, the actions taken, what was learned, and feedback.
+One order = one Temporal workflow. The workflow is a durable state machine with an agent loop inside it. It can sleep for minutes or hours on a timer that survives crashes (wake-ups are bounded to 1–240 minutes, so longer waits are chains of durable timers), wake up the moment an important event arrives, make one decision, record one action, and sleep again. When the order reaches a terminal state, the workflow produces a final report: a summary, the actions taken, what was learned, and feedback.
 
 If you remember one sentence: **the workflow decides WHEN things happen, the agent decides WHAT should happen, and the activities make it happen safely.**
 
@@ -92,8 +92,9 @@ uv run python supervisor_worker.py
 **What you will see:**
 When successfully connected, the terminal displays:
 ```text
-Supervisor worker started on queue 'supervisor-task-queue'. Waiting for tasks...
+Supervisor worker started...
 ```
+(Then the terminal stays quiet — that is correct. It is waiting for tasks, and new lines appear whenever the agent handles an event.)
 👉 **Important:** Keep this terminal window open! Leave it running.
 
 ---
@@ -173,7 +174,7 @@ This confirms that the workflow lifecycle, decision allowlist, security guardrai
 3. **Inject events.** Open the run and use the Inject Event panel on the right. Try `payment_delayed` with a payload like `{"reason": "gateway timeout"}`. The agent wakes, decides, and the action appears in the timeline.
 4. **Watch it sleep and wake.** After a decision the agent schedules its next wake-up. The run header shows the sleeping state and the next wake time. In the Temporal UI (http://localhost:8080) you can see the timer in the workflow history.
 5. **Add an instruction while it runs.** Type something like "if delayed again, escalate immediately" in the Add Instruction panel. The next decision honors it.
-6. **Pause, resume, or terminate.** The header buttons control the run. A terminated run ends immediately; the final report is produced only when the run completes on a terminal event.
+6. **Pause, resume, or terminate.** The header buttons control the run. A terminated run ends immediately — and it still produces its final report before exiting, so nothing is ever lost.
 7. **See the final report.** Inject `completed`. The Final Output tab shows the summary, the actions taken, the learnings, and feedback.
 8. **Open the Analytics page.** Every LLM decision is listed with its provider, model, token count, and latency, and each one links to its trace in Langfuse.
 
