@@ -8,7 +8,7 @@ from llm.spec import ChatSpec, GatewayError
 from observability import record_decision
 
 
-def _persist_decision(order_id: str, event: dict, decision: dict, provider: str, usage) -> None:
+def _persist_decision(order_id: str, event: dict, decision: dict, provider: str, usage, trace_url=None) -> None:
     """Store the decision for observability. Never raises."""
     try:
         import psycopg
@@ -234,7 +234,7 @@ async def decide(order_id: str, event: dict) -> dict:
         usage=usage,
     )
 
-    _persist_decision(order_id, event, decision, provider, usage)
+    _persist_decision(order_id, event, decision, provider, usage, trace_url)
 
     if activity.in_activity():
         activity.logger.info(
