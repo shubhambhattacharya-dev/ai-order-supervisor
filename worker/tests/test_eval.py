@@ -19,13 +19,14 @@ def fake_gateway(monkeypatch, *responses):
 async def test_j1_payment_delay_journey(monkeypatch):
     fake_gateway(
         monkeypatch,
-        '{"action": "message_payments_team", "reason": "Payment delay needs review", "wake_after_minutes": 120}',
+        '{"action": "message_payments_team", "reason": "Payment delay needs review"}',
         '{"action": "no_action", "reason": "Order completed, nothing to do"}',
     )
 
     d1 = await decide("ORD-E1", {"event_id": "e1", "type": "PAYMENT_DELAYED"})
     assert d1["action"] == "message_payments_team"
-    assert 5 <= d1.get("wake_after_minutes", 0) <= 240
+    # Wake-ups belong to sleep decisions only - a business action carries none.
+    assert "wake_after_minutes" not in d1
     assert d1["action"] not in DESTRUCTIVE
 
     d2 = await decide("ORD-E1", {"event_id": "e2", "type": "COMPLETED"})

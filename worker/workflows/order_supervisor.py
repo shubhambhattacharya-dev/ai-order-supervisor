@@ -121,6 +121,7 @@ class OrderSupervisorWorkflow:
                         **event,
                         "operator_instructions": self.instructions,
                     },
+                    self.memory[-8:],
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),

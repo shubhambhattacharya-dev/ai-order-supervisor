@@ -30,7 +30,8 @@ class TestDecisionTable:
             ("REFUND_REQUESTED", "create_internal_note"),
             ("COMPLETED", "no_action"),
             ("DELIVERED", "no_action"),
-            ("NO_UPDATE_FOR_N_HOURS", "message_customer"),
+            # No-update is a recheck, not customer contact: sleep and look again.
+            ("NO_UPDATE_FOR_N_HOURS", "sleep_until"),
         ],
     )
     def test_decide_maps_event_types(self, event_type, expected_action):
