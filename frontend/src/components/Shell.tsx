@@ -17,7 +17,6 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const [online, setOnline] = useState(false);
   const [dark, setDark] = useState(true);
 
-  /* eslint-disable react-hooks/set-state-in-effect -- syncing with external systems (DOM theme class + API health) */
   useEffect(() => {
     setDark(document.documentElement.classList.contains("dark"));
     const check = () => apiHealthy().then(setOnline);
@@ -25,7 +24,6 @@ export default function Shell({ children }: { children: React.ReactNode }) {
     const id = setInterval(check, 5000);
     return () => clearInterval(id);
   }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   function toggleTheme() {
     const next = !dark;

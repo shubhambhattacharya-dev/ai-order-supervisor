@@ -18,6 +18,14 @@ If you remember one sentence: **the workflow decides WHEN things happen, the age
 
 You do not need to be a software engineer to run this project. Follow these simple steps in order.
 
+### The Easy Way (One Command)
+
+**On Windows:** double-click the file named `start.bat` in the main folder. It starts everything and opens four windows (Docker services, the worker, the backend, and the website), then opens http://localhost:3000 in your browser.
+
+**On Mac or Linux:** run `bash start.sh` in the main folder.
+
+After everything is running, continue with **Step 2** below to add your API key, and use **Step 6** to run the tests. The manual steps below explain what each window does.
+
 ### What You Need on Your Computer
 
 Before you start, make sure you have these four free programs installed:

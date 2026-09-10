@@ -59,13 +59,11 @@ export default function RunDetailPage() {
   }, [orderId]);
 
   // Real-time: SSE pushes status the moment it changes; activities refetch on each push.
-  /* eslint-disable react-hooks/set-state-in-effect -- syncing with the backend API is this effect's whole job */
   useEffect(() => {
     refresh();
     const close = subscribeRun(orderId, () => { setMissing(false); refresh(); });
     return close;
   }, [orderId, refresh]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Fallback poll in case the SSE connection drops.
   useEffect(() => {
