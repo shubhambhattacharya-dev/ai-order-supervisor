@@ -379,9 +379,9 @@ async def analytics_decisions():
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT order_id, event_id, provider, model, action, reason,
+                SELECT id, order_id, event_id, provider, model, action, reason,
                        prompt_tokens, completion_tokens, latency_ms,
-                       fallback_used, created_at
+                       fallback_used, trace_url, created_at
                 FROM decisions ORDER BY id DESC LIMIT 100
                 """
             )
@@ -389,10 +389,11 @@ async def analytics_decisions():
 
     decisions = [
         {
-            "order_id": r[0], "event_id": r[1], "provider": r[2], "model": r[3],
-            "action": r[4], "reason": r[5], "prompt_tokens": r[6],
-            "completion_tokens": r[7], "latency_ms": float(r[8] or 0),
-            "fallback_used": r[9], "created_at": r[10].isoformat(),
+            "id": r[0], "order_id": r[1], "event_id": r[2], "provider": r[3],
+            "model": r[4], "action": r[5], "reason": r[6], "prompt_tokens": r[7],
+            "completion_tokens": r[8], "latency_ms": float(r[9] or 0),
+            "fallback_used": r[10], "trace_url": r[11],
+            "created_at": r[12].isoformat(),
         }
         for r in rows
     ]
