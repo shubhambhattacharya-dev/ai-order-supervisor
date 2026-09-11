@@ -15,6 +15,7 @@ def _conn() -> psycopg.Connection[Any]:
         dbname=os.environ.get("POSTGRES_DB", "order_supervisor"),
         user=os.environ.get("POSTGRES_USER", "postgres"),
         password=os.environ.get("POSTGRES_PASSWORD", "postgres"),
+        connect_timeout=3,
     )
 
 

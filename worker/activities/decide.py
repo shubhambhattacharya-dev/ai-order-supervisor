@@ -19,6 +19,7 @@ def _persist_decision(order_id: str, event: dict, decision: dict, provider: str,
             dbname=os.environ.get("POSTGRES_DB", "order_supervisor"),
             user=os.environ.get("POSTGRES_USER", "postgres"),
             password=os.environ.get("POSTGRES_PASSWORD", "postgres"),
+            connect_timeout=3,
         ) as conn:
             with conn.cursor() as cur:
                 cur.execute(
